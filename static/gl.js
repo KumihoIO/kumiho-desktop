@@ -201,6 +201,9 @@ in vec2 vC;
 out vec4 frag;
 uniform vec2 uCenter;
 uniform float uAspect, uTime, uInt, uRad, uSpaces;
+uniform float uScrim;          // 1 while search/filter/highlight/selection is
+                               // active: dim the backdrop so the graph keeps
+                               // its figure-ground over the star imagery
 uniform sampler2D uFieldTex;   // JWST Pillars image, shown in spaces mode
 uniform float uFieldReady;     // 1 once the image texture has loaded
 uniform sampler2D uOrbTex;     // JWST Southern Ring image, shown in unified mode
@@ -279,7 +282,9 @@ void main(){
   vec3 orb = texture(uOrbTex, cover(vec2(vC.x * 0.5 + 0.5, 0.5 - vC.y * 0.5), uOrbAspect)).rgb;
   col = mix(col, orb * 0.55, uOrbReady);
   // crossfade unified radial glow <-> spaces deep-field
-  frag = vec4(mix(col, col2, clamp(uSpaces, 0.0, 1.0)) * uInt, 1.0);
+  vec3 mixed = mix(col, col2, clamp(uSpaces, 0.0, 1.0)) * uInt;
+  mixed *= mix(1.0, 0.32, clamp(uScrim, 0.0, 1.0));
+  frag = vec4(mixed, 1.0);
 }`;
 
 const PICK_VS = `#version 300 es
@@ -1247,6 +1252,13 @@ export class BrainGL {
     this._spacesMix += (target - this._spacesMix) * (1 - Math.exp(-dt * 2.4));
     const sm = this._spacesMix;
     if (sm > 0.001 && sm < 0.999) this.dirty = true;
+    // audit interactions scrim the backdrop: dimming only the graph can't
+    // carve figure-ground when the backdrop has stars of its own
+    const scrimTarget =
+      this.searchActive > 0.5 || this.spaceHi >= 0 || this.sel >= 0 ? 1 : 0;
+    this._scrim = (this._scrim || 0) + (scrimTarget - (this._scrim || 0)) * (1 - Math.exp(-dt * 6));
+    if (Math.abs(scrimTarget - this._scrim) > 0.002) this.dirty = true;
+    gl.uniform1f(this.u.nebula.uScrim, this._scrim);
     gl.uniform1f(this.u.nebula.uSpaces, sm);
     gl.uniform1f(this.u.nebula.uInt, 0.72 + 0.10 * sm);
     gl.uniform1f(this.u.nebula.uRad, (1.05 + 0.50 * sm) * (5.2 / cam.dist));
