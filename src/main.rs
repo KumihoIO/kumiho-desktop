@@ -208,23 +208,40 @@ async fn main() {
             access::guard,
         ));
 
-    let addr = format!("{}:{}", cfg.bind, cfg.port);
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("kumiho-brain: cannot bind {addr}: {e}");
-            std::process::exit(1);
+    // Bind, sliding to the next free port when the default is taken (an
+    // explicit --port/env choice fails loudly instead).
+    let mut port = cfg.port;
+    let listener = loop {
+        match tokio::net::TcpListener::bind(format!("{}:{port}", cfg.bind)).await {
+            Ok(l) => break l,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::AddrInUse
+                    && !cfg.port_explicit
+                    && port < cfg.port + 10 =>
+            {
+                tracing::info!("port {port} is busy — trying {}", port + 1);
+                port += 1;
+            }
+            Err(e) => {
+                eprintln!("kumiho-brain: cannot bind {}:{port}: {e}", cfg.bind);
+                std::process::exit(1);
+            }
         }
     };
-    println!("\n  🦊🧠  Kumiho Brain — http://127.0.0.1:{}", cfg.port);
+    let local_url = format!("http://127.0.0.1:{port}");
+    print!("\n  🦊🧠  Kumiho Brain — {local_url}");
+    println!("{}", if port != cfg.port { format!("   (port {} was busy)", cfg.port) } else { String::new() });
     if let Some(key) = &access_key {
         let host = access::lan_ip()
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| cfg.bind.clone());
-        println!("        remote: http://{host}:{}/?key={key}", cfg.port);
+        println!("        remote: http://{host}:{port}/?key={key}");
         println!("        (the key is needed once per browser; local clients never need it)");
     }
     println!();
+    if cfg.open {
+        open_browser(&local_url);
+    }
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -234,6 +251,21 @@ async fn main() {
     })
     .await
     .expect("server error");
+}
+
+/// Best-effort default-browser launch; failures are silent (headless boxes).
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let (cmd, args) = ("open", vec![url.to_string()]);
+    #[cfg(target_os = "windows")]
+    let (cmd, args) = ("cmd", vec!["/C".into(), "start".into(), String::new(), url.to_string()]);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (cmd, args) = ("xdg-open", vec![url.to_string()]);
+    let _ = std::process::Command::new(cmd)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Build the SDK client per config: `--local` → loopback CE, `--endpoint` →

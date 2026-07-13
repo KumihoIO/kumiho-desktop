@@ -16,6 +16,10 @@ const CODE_KINDS: &[&str] = &["code_decision", "code_anchor", "code_evidence"];
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
+    /// True when the port came from --port/env (disables auto-fallback).
+    pub port_explicit: bool,
+    /// Open the dashboard in the default browser once serving.
+    pub open: bool,
     /// Interface to listen on (default loopback; the dashboard serves the
     /// whole memory graph, so non-loopback binds require an access key).
     pub bind: String,
@@ -62,11 +66,13 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
         };
+        let env_port = env("KUMIHO_BRAIN_PORT")
+            .map(|v| v.parse::<u16>().map_err(|_| "invalid KUMIHO_BRAIN_PORT"))
+            .transpose()?;
         let mut cfg = Config {
-            port: env("KUMIHO_BRAIN_PORT")
-                .map(|v| v.parse().map_err(|_| "invalid KUMIHO_BRAIN_PORT"))
-                .transpose()?
-                .unwrap_or(DEFAULT_PORT),
+            port_explicit: env_port.is_some(),
+            port: env_port.unwrap_or(DEFAULT_PORT),
+            open: false,
             bind: env("KUMIHO_BRAIN_BIND").unwrap_or_else(|| "127.0.0.1".into()),
             key: env("KUMIHO_BRAIN_KEY"),
             no_auth: false,
@@ -97,7 +103,15 @@ impl Config {
                     .ok_or_else(|| format!("{name} requires a value"))
             };
             match a.as_str() {
-                "--port" => cfg.port = take("--port")?.parse().map_err(|_| "invalid --port")?,
+                "--port" => {
+                    cfg.port = take("--port")?.parse().map_err(|_| "invalid --port")?;
+                    cfg.port_explicit = true;
+                }
+                "--open" | "-o" => cfg.open = true,
+                "--version" | "-V" => {
+                    println!("kumiho-brain {}", env!("CARGO_PKG_VERSION"));
+                    std::process::exit(0);
+                }
                 "--bind" => cfg.bind = take("--bind")?,
                 "--key" => cfg.key = Some(take("--key")?),
                 "--no-auth" => cfg.no_auth = true,
@@ -125,13 +139,16 @@ const HELP: &str = "\
 kumiho-brain — real-time WebGL dashboard for the living Kumiho memory graph
 
 USAGE:
-  kumiho-brain [--port N] [--bind ADDR] [--key SECRET] [--no-auth]
+  kumiho-brain [--open] [--port N] [--bind ADDR] [--key SECRET] [--no-auth]
                [--endpoint HOST:PORT] [--tenant SLUG] [--local]
-               [--edge-revs N] [--static-dir DIR]
+               [--edge-revs N] [--static-dir DIR] [--version]
 
   Connects like every Kumiho SDK client: explicit --endpoint, else bearer token
   (~/.kumiho) + control-plane discovery to your cloud tenant, else a loopback
   self-hosted CE server. --local skips the token and forces the CE probe.
+
+  --open (-o) launches your browser once serving. If the default port is busy
+  the next free one is used automatically (explicit --port disables that).
 
 REMOTE ACCESS:
   The dashboard serves your whole memory graph, so it binds 127.0.0.1 by

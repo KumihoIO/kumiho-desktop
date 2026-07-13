@@ -18,20 +18,36 @@ dashboard/
 
 ## Run it
 
+One-liner install on any machine with Rust — no protoc, no submodule dance
+(`cargo install` checks the submodule out itself, and the SDK falls back to a
+vendored `protoc` when none is installed):
+
 ```bash
-cd dashboard
-cargo run            # → http://127.0.0.1:8090
+cargo install --git https://github.com/KumihoIO/kumiho-SDKs kumiho-brain
+kumiho-brain --open        # serves and opens your browser
 ```
+
+Or from a clone:
+
+```bash
+git clone --recurse-submodules https://github.com/KumihoIO/kumiho-SDKs
+cd kumiho-SDKs/dashboard
+cargo run -- --open        # → http://127.0.0.1:8090
+```
+
+(Forgot `--recurse-submodules`? The build tells you the exact command.
+If the default port is busy, the next free one is picked automatically.)
 
 Connection follows the standard SDK bootstrap chain: bearer token from
 `~/.kumiho` → control-plane discovery → your cloud tenant; with no token it
 probes a loopback self-hosted CE server. Options:
 
 ```
+--open, -o             open the dashboard in your browser once serving
 --endpoint HOST:PORT   explicit kumiho-server (or KUMIHO_BRAIN_ENDPOINT)
 --tenant SLUG          pin discovery to a tenant
 --local                force the loopback self-hosted CE server
---port N               HTTP port (default 8090)
+--port N               HTTP port (default 8090; auto-slides if busy unless explicit)
 --bind ADDR            listen interface (default 127.0.0.1 — memory is private)
 --key SECRET           access key for non-loopback clients (else auto-managed)
 --no-auth              serve a non-loopback bind without any key (not recommended)
@@ -40,8 +56,9 @@ probes a loopback self-hosted CE server. Options:
                        (frontend dev without recompiling)
 ```
 
-Requires `protoc` on PATH and the proto submodule
-(`git submodule update --init rust/proto`) — same as building the SDK itself.
+System `protoc` is optional (the SDK's default `vendored-protoc` feature
+provides one); in-repo builds need the proto submodule, and the build error
+tells you the exact `git submodule` command if it's missing.
 
 ### Remote access
 
