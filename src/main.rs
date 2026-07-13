@@ -4,6 +4,7 @@
 //! crawls the memory graph into a snapshot, subscribes to the live event
 //! stream, and serves the WebGL2 frontend + WebSocket feed.
 
+mod access;
 mod config;
 mod fetch;
 mod live;
@@ -176,6 +177,21 @@ async fn main() {
         endpoint_label: Arc::new(endpoint_label),
     };
 
+    // Non-loopback binds expose the whole memory graph — gate them behind an
+    // access key unless --no-auth was given explicitly.
+    let remote_bind = !access::is_loopback_bind(&cfg.bind);
+    let access_key: Option<std::sync::Arc<String>> = if remote_bind && !cfg.no_auth {
+        Some(std::sync::Arc::new(access::resolve_key(cfg.key.as_deref())))
+    } else {
+        if remote_bind {
+            tracing::warn!(
+                "--no-auth: serving the memory graph unauthenticated on {}",
+                cfg.bind
+            );
+        }
+        None
+    };
+
     let app = Router::new()
         .route("/", get(index))
         .route("/static/:file", get(static_file))
@@ -183,10 +199,13 @@ async fn main() {
         .route("/api/snapshot", get(snapshot))
         .route("/api/node/:id", get(node_detail))
         .route("/ws", get(ws_upgrade))
-        .with_state(state);
+        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(
+            access_key.clone(),
+            access::guard,
+        ));
 
-    let bind = std::env::var("KUMIHO_BRAIN_BIND").unwrap_or_else(|_| "127.0.0.1".into());
-    let addr = format!("{bind}:{}", cfg.port);
+    let addr = format!("{}:{}", cfg.bind, cfg.port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -194,13 +213,24 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    println!("\n  🦊🧠  Kumiho Brain — http://{addr}\n");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .expect("server error");
+    println!("\n  🦊🧠  Kumiho Brain — http://127.0.0.1:{}", cfg.port);
+    if let Some(key) = &access_key {
+        let host = access::lan_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| cfg.bind.clone());
+        println!("        remote: http://{host}:{}/?key={key}", cfg.port);
+        println!("        (the key is needed once per browser; local clients never need it)");
+    }
+    println!();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+    .expect("server error");
 }
 
 /// Build the SDK client per config: `--local` → loopback CE, `--endpoint` →

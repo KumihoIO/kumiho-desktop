@@ -31,8 +31,10 @@ probes a loopback self-hosted CE server. Options:
 --endpoint HOST:PORT   explicit kumiho-server (or KUMIHO_BRAIN_ENDPOINT)
 --tenant SLUG          pin discovery to a tenant
 --local                force the loopback self-hosted CE server
---port N               HTTP port (default 8090; binds 127.0.0.1 — memory is private,
-                       set KUMIHO_BRAIN_BIND=0.0.0.0 only if you mean it)
+--port N               HTTP port (default 8090)
+--bind ADDR            listen interface (default 127.0.0.1 — memory is private)
+--key SECRET           access key for non-loopback clients (else auto-managed)
+--no-auth              serve a non-loopback bind without any key (not recommended)
 --edge-revs N          newest revisions per item scanned for edges (default 3, 0 = all)
 --static-dir DIR       serve the frontend from disk instead of the embedded copy
                        (frontend dev without recompiling)
@@ -40,6 +42,24 @@ probes a loopback self-hosted CE server. Options:
 
 Requires `protoc` on PATH and the proto submodule
 (`git submodule update --init rust/proto`) — same as building the SDK itself.
+
+### Remote access
+
+The dashboard serves your whole memory graph, so it only listens on loopback
+by default. To reach it from another machine:
+
+```bash
+cargo run -- --bind 0.0.0.0
+```
+
+Non-loopback binds are gated behind an **access key**: `--key`/
+`KUMIHO_BRAIN_KEY` if provided, otherwise one is generated and persisted at
+`$KUMIHO_CONFIG_DIR/kumiho-brain.key` (mode 0600) so it stays stable across
+restarts. The startup banner prints the ready-to-open URL
+(`http://<lan-ip>:8090/?key=…`) — the key is needed once per browser (a
+session cookie takes over, including for the WebSocket), and loopback clients
+never need it. An SSH tunnel (`ssh -L 8090:127.0.0.1:8090 host`) remains the
+zero-config alternative.
 
 ## What it does
 

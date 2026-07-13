@@ -16,6 +16,13 @@ const CODE_KINDS: &[&str] = &["code_decision", "code_anchor", "code_evidence"];
 #[derive(Debug, Clone)]
 pub struct Config {
     pub port: u16,
+    /// Interface to listen on (default loopback; the dashboard serves the
+    /// whole memory graph, so non-loopback binds require an access key).
+    pub bind: String,
+    /// Access key for non-loopback clients (else generated + persisted).
+    pub key: Option<String>,
+    /// Explicitly serve without any access key on a non-loopback bind.
+    pub no_auth: bool,
     /// Explicit gRPC endpoint (else the SDK bootstrap chain decides).
     pub endpoint: Option<String>,
     /// Pin discovery to a tenant slug/id.
@@ -60,6 +67,9 @@ impl Config {
                 .map(|v| v.parse().map_err(|_| "invalid KUMIHO_BRAIN_PORT"))
                 .transpose()?
                 .unwrap_or(DEFAULT_PORT),
+            bind: env("KUMIHO_BRAIN_BIND").unwrap_or_else(|| "127.0.0.1".into()),
+            key: env("KUMIHO_BRAIN_KEY"),
+            no_auth: false,
             endpoint: env("KUMIHO_BRAIN_ENDPOINT"),
             tenant: env("KUMIHO_BRAIN_TENANT"),
             local: false,
@@ -88,6 +98,9 @@ impl Config {
             };
             match a.as_str() {
                 "--port" => cfg.port = take("--port")?.parse().map_err(|_| "invalid --port")?,
+                "--bind" => cfg.bind = take("--bind")?,
+                "--key" => cfg.key = Some(take("--key")?),
+                "--no-auth" => cfg.no_auth = true,
                 "--endpoint" => cfg.endpoint = Some(take("--endpoint")?),
                 "--tenant" => cfg.tenant = Some(take("--tenant")?),
                 "--local" => cfg.local = true,
@@ -112,15 +125,26 @@ const HELP: &str = "\
 kumiho-brain — real-time WebGL dashboard for the living Kumiho memory graph
 
 USAGE:
-  kumiho-brain [--port N] [--endpoint HOST:PORT] [--tenant SLUG] [--local]
+  kumiho-brain [--port N] [--bind ADDR] [--key SECRET] [--no-auth]
+               [--endpoint HOST:PORT] [--tenant SLUG] [--local]
                [--edge-revs N] [--static-dir DIR]
 
   Connects like every Kumiho SDK client: explicit --endpoint, else bearer token
   (~/.kumiho) + control-plane discovery to your cloud tenant, else a loopback
   self-hosted CE server. --local skips the token and forces the CE probe.
 
+REMOTE ACCESS:
+  The dashboard serves your whole memory graph, so it binds 127.0.0.1 by
+  default. `--bind 0.0.0.0` opens it to the network behind an access key:
+  --key/KUMIHO_BRAIN_KEY if set, else one is generated and persisted at
+  $KUMIHO_CONFIG_DIR/kumiho-brain.key (the startup banner prints the full
+  URL). Remote clients open http://host:port/?key=… once — a cookie keeps
+  the session; loopback clients never need the key. --no-auth disables the
+  gate entirely (not recommended).
+
 ENV:
-  KUMIHO_BRAIN_PORT, KUMIHO_BRAIN_ENDPOINT, KUMIHO_BRAIN_TENANT,
+  KUMIHO_BRAIN_PORT, KUMIHO_BRAIN_BIND, KUMIHO_BRAIN_KEY,
+  KUMIHO_BRAIN_ENDPOINT, KUMIHO_BRAIN_TENANT,
   KUMIHO_BRAIN_CONV_KINDS, KUMIHO_BRAIN_CODE_KINDS (comma-separated),
   KUMIHO_BRAIN_CONCURRENCY, KUMIHO_BRAIN_EDGE_REVS, KUMIHO_BRAIN_STATIC_DIR
   plus the standard SDK vars (KUMIHO_AUTH_TOKEN, KUMIHO_SERVER_ENDPOINT, …).";
