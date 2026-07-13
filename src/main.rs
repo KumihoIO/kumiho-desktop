@@ -258,8 +258,12 @@ async fn connect(cfg: &Config) -> Result<(kumiho::Client, String), kumiho::Error
     Ok((b.build().await?, label))
 }
 
-async fn index(State(app): State<AppState>) -> Html<String> {
-    Html(load_static(&app, "index.html").await)
+async fn index(State(app): State<AppState>) -> Response {
+    (
+        [(header::CACHE_CONTROL, "no-cache")],
+        Html(load_static(&app, "index.html").await),
+    )
+        .into_response()
 }
 
 async fn static_file(Path(file): Path<String>, State(app): State<AppState>) -> Response {
@@ -269,7 +273,14 @@ async fn static_file(Path(file): Path<String>, State(app): State<AppState>) -> R
         "gl.js" => (load_static(&app, "gl.js").await, "text/javascript"),
         _ => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
-    ([(header::CONTENT_TYPE, format!("{mime}; charset=utf-8"))], body).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, format!("{mime}; charset=utf-8")),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// Embedded frontend, with a disk override for frontend development

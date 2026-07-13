@@ -3,7 +3,7 @@
 
 'use strict';
 
-import { BrainGL } from '/static/gl.js';
+import { BrainGL } from '/static/gl.js?v=3';
 
 const EDGE_TYPES = ['REFERENCED', 'DERIVED_FROM', 'SUPERSEDES', 'DEPENDS_ON', 'ABOUT', 'IMPLEMENTED_IN', 'MOTIVATED_BY'];
 const EDGE_HEX = ['#8594b3', '#9e7aff', '#ff5c4d', '#33c79e', '#ebc757', '#529eff', '#ff8cd9', '#6b7588'];

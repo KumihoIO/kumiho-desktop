@@ -79,8 +79,8 @@ void main(){
   if (uSpaceHi > -0.5) on *= (abs(iState.y - uSpaceHi) < 0.5) ? 1.0 : 0.10;
   float fog = clamp((7.2 - dist) / 3.0, 0.38, 1.0);
   vGlow = (0.9 + 0.55*pulse + pop + sel*1.3) * fog * on;
-  vec3 conv = vec3(0.40, 0.72, 1.00);
-  vec3 code = vec3(1.00, 0.62, 0.26);
+  vec3 conv = vec3(0.50, 0.82, 1.00);
+  vec3 code = vec3(1.00, 0.60, 0.26);
   vCol = mix(conv, code, iMeta.y) * ambient(uTime);
   vCol = mix(vCol, vec3(1.0), sel*0.25 + (uSearch > 0.5 ? iState.x*0.15 : 0.0));
   vBirth = (iMeta.x > 0.0) ? age : 9.0;
@@ -127,6 +127,8 @@ uniform sampler2D uPosTex;
 uniform sampler2D uAnchorTex;
 uniform mat4 uProj, uView;
 uniform float uTime, uSearch, uSel, uSpaceHi, uStateless;
+uniform float uAmbient;       // 1 = proximity filament layer (render texture,
+                              // not data): fainter, colorless, no audit affordances
 uniform vec4 uPulse;          // x node id, y start time
 uniform vec3 uTypeCol[8];
 out vec3 vCol;
@@ -143,18 +145,23 @@ vec3 nodePos(float idx){
 }
 void main(){
   vec3 world = nodePos(aIdx);
+  vec3 other = nodePos(aOther);
   vec4 view = uView * vec4(world, 1.0);
   gl_Position = uProj * view;
   float dist = max(0.6, -view.z);
   float fog = clamp((7.2 - dist) / 3.2, 0.14, 1.0);
+  // short local links form the web; the rare long haul fades back
+  float len = distance(world, other);
+  float lfog = mix(0.28, 1.0, smoothstep(1.5, 0.45, len));
   float shim = 0.55 + 0.45*sin(uTime*0.7 + (aIdx + aOther)*0.37);
-  float hi = (abs(aIdx - uSel) < 0.5 || abs(aOther - uSel) < 0.5) ? 1.0 : 0.0;
-  float on = (uSearch > 0.5) ? 0.22 : 1.0;
+  float hi = (1.0 - uAmbient) * ((abs(aIdx - uSel) < 0.5 || abs(aOther - uSel) < 0.5) ? 1.0 : 0.0);
+  float on = (uSearch > 0.5) ? mix(0.22, 0.05, uAmbient) : 1.0;
   if (uSpaceHi > -0.5) on *= (abs(aSpaces.x - uSpaceHi) < 0.5 && abs(aSpaces.y - uSpaceHi) < 0.5) ? 1.0 : 0.10;
-  vCol = uTypeCol[int(aType + 0.5)];
-  vA = (0.13 + 0.10*shim) * fog * on + hi * 0.6;
+  vCol = mix(uTypeCol[int(aType + 0.5)], vec3(0.74, 0.82, 0.98), uAmbient);
+  float base = mix(0.16 + 0.11*shim, 0.105 + 0.07*shim, uAmbient);
+  vA = base * fog * lfog * on + hi * 0.6;
   vT = aT;
-  float touched = (abs(aIdx - uPulse.x) < 0.5 || abs(aOther - uPulse.x) < 0.5) ? 1.0 : 0.0;
+  float touched = (1.0 - uAmbient) * ((abs(aIdx - uPulse.x) < 0.5 || abs(aOther - uPulse.x) < 0.5) ? 1.0 : 0.0);
   vPulse = touched * max(0.0, 1.0 - (uTime - uPulse.y) * 0.5);
 }`;
 
@@ -201,33 +208,25 @@ void main(){
   vec2 d = vC - uCenter;
   d.x *= uAspect;
   float r = length(d);
-  vec2 np = d * 2.1;
-  float w1 = fbm(np*1.15 + uTime*0.014);
-  float w2 = fbm(np*0.9 - uTime*0.010 + w1*1.7);
-  float n = fbm(np + vec2(w2, w1)*1.4 + vec2(0.0, uTime*0.008));
-  float env = smoothstep(uRad, 0.10, r);
-  float dens = env * (0.22 + 0.78*n);
-  float inner = smoothstep(0.52, 0.03, r);
-  vec3 outer = vec3(0.94, 0.46, 0.18);
-  vec3 core  = vec3(0.34, 0.62, 1.00);
+  // north-star gas recipe: one domain warp over fbm filaments, slow churn
+  vec2 np = d * 2.4;
+  float warp = fbm(np*1.3 + uTime*0.02);
+  float n = fbm(np + warp*1.4 + vec2(0.0, uTime*0.012));
+  float env = smoothstep(uRad, 0.11, r);
+  float dens = env * (0.24 + 0.76*n);
+  float inner = smoothstep(0.46, 0.02, r);
+  vec3 outer = vec3(1.00, 0.52, 0.22);
+  vec3 core  = vec3(0.40, 0.74, 1.00);
   vec3 col = mix(outer, core, inner) * dens;
-  col += vec3(0.72, 0.84, 1.0) * smoothstep(0.05, 0.0, r) * 1.2;
-  // scope sight-lines through the core — the targeting-terminal signature.
-  // (width is ~2x the reference: this pass renders at half resolution)
-  float sp = (smoothstep(0.006, 0.0, abs(d.x)) + smoothstep(0.006, 0.0, abs(d.y)))
-           * smoothstep(0.34, 0.0, r);
-  col += vec3(0.82, 0.90, 1.0) * sp * 0.65;
+  col += vec3(0.78, 0.90, 1.0) * smoothstep(0.05, 0.0, r) * 1.7;
+  // scope sight-lines through the core — the targeting-terminal signature
+  float sp = (smoothstep(0.0026, 0.0, abs(d.x)) + smoothstep(0.0026, 0.0, abs(d.y)))
+           * smoothstep(0.30, 0.0, r);
+  col += vec3(0.82, 0.90, 1.0) * sp * 0.55;
   // clear the lower band so the perspective floor grid reads
-  col *= mix(1.0, 0.40, smoothstep(-0.45, -1.0, vC.y));
+  col *= mix(1.0, 0.5, smoothstep(-0.45, -1.0, vC.y));
   frag = vec4(col * uInt, 1.0);
 }`;
-
-const BLIT_FS = `#version 300 es
-precision mediump float;
-in vec2 vC;
-out vec4 frag;
-uniform sampler2D uTex;
-void main(){ frag = texture(uTex, vC*0.5 + 0.5); }`;
 
 const PICK_VS = `#version 300 es
 precision highp float;
@@ -382,8 +381,9 @@ export class BrainGL {
     this.state = null;    // f32 cap*2 (flag, spaceId)
     this._seeds = null;   // u32 cap
     this.edges = [];      // {src, dst, t}
-    this.edgeCap = 0;
-    this.edgeCount = 0;
+    this._typed = null;    // real interlinks (colored, interactive)
+    this._ambient = null;  // proximity filaments (render texture only)
+    this._ambientDirty = false;
     this.spaceLayout = new Map();
 
     this._initGL();
@@ -398,14 +398,12 @@ export class BrainGL {
     this.progPoint = program(gl, POINT_VS, POINT_FS, 'point');
     this.progEdge = program(gl, EDGE_VS, EDGE_FS, 'edge');
     this.progNebula = program(gl, QUAD_VS, NEBULA_FS, 'nebula');
-    this.progBlit = program(gl, QUAD_VS, BLIT_FS, 'blit');
     this.progPick = program(gl, PICK_VS, PICK_FS, 'pick');
     this.u = {
       sim: uniformMap(gl, this.progSim),
       point: uniformMap(gl, this.progPoint),
       edge: uniformMap(gl, this.progEdge),
       nebula: uniformMap(gl, this.progNebula),
-      blit: uniformMap(gl, this.progBlit),
       pick: uniformMap(gl, this.progPick),
     };
 
@@ -413,8 +411,6 @@ export class BrainGL {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
 
-    this.nebTex = gl.createTexture();
-    this.nebFbo = gl.createFramebuffer();
     this.pickTex = gl.createTexture();
     this.pickFbo = gl.createFramebuffer();
     this.posTex = gl.createTexture();
@@ -447,12 +443,6 @@ export class BrainGL {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     };
-    this.nebW = Math.max(2, w >> 1);
-    this.nebH = Math.max(2, h >> 1);
-    rgba8(this.nebTex, this.nebW, this.nebH, gl.LINEAR);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.nebFbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.nebTex, 0);
-
     this.pickW = Math.max(2, w >> 2);
     this.pickH = Math.max(2, h >> 2);
     rgba8(this.pickTex, this.pickW, this.pickH, gl.NEAREST);
@@ -497,6 +487,7 @@ export class BrainGL {
       return a;
     };
     this.anchors = grow(this.anchors, 4);
+    this._homes = grow(this._homes, 4);
     this.meta = grow(this.meta, 4);
     this.state = grow(this.state, 2);
     this._seeds = grow(this._seeds, 1, Uint32Array);
@@ -546,6 +537,9 @@ export class BrainGL {
     for (const n of nodes) {
       this._seeds[n.id] = n.seed >>> 0;
       this._writeNode(n, false);
+    }
+    this._refineAnchors(edges);
+    for (const n of nodes) {
       const i = n.id;
       this._spawnPos(i, [this.anchors[i*4], this.anchors[i*4+1], this.anchors[i*4+2]]);
     }
@@ -553,6 +547,35 @@ export class BrainGL {
     this.setEdges(edges);
     this.dirty = true;
     void spacesCount;
+  }
+
+  // Graph-aware layout: pull linked memories toward each other (spring to an
+  // ideal edge length) while a home force preserves the seeded sphere fill —
+  // real interlinks become the short, local web of the north-star instead of
+  // long chords across the orb. Deterministic: fixed order, fixed iterations.
+  _refineAnchors(edges) {
+    if (!edges || !edges.length || !this.count) return;
+    const A = this.anchors, H = this._homes;
+    const IDEAL = 0.26, K = 0.10, HOME = 0.022, ITER = 140;
+    for (let it = 0; it < ITER; it++) {
+      for (const e of edges) {
+        if (this.state[e.src*2] < -0.5 || this.state[e.dst*2] < -0.5) continue;
+        const i = e.src*4, j = e.dst*4;
+        let dx = A[j] - A[i], dy = A[j+1] - A[i+1], dz = A[j+2] - A[i+2];
+        const L = Math.hypot(dx, dy, dz) || 1e-4;
+        const f = (K * (L - IDEAL)) / L;
+        dx *= f; dy *= f; dz *= f;
+        A[i] += dx*0.5; A[i+1] += dy*0.5; A[i+2] += dz*0.5;
+        A[j] -= dx*0.5; A[j+1] -= dy*0.5; A[j+2] -= dz*0.5;
+      }
+      for (let k = 0; k < this.count; k++) {
+        if (this.state[k*2] < -0.5) continue;
+        const i = k*4;
+        A[i]   += (H[i]   - A[i])   * HOME;
+        A[i+1] += (H[i+1] - A[i+1]) * HOME;
+        A[i+2] += (H[i+2] - A[i+2]) * HOME;
+      }
+    }
   }
 
   _layoutSpaces(nodes) {
@@ -591,10 +614,10 @@ export class BrainGL {
     const rr = Math.sqrt(Math.max(0, 1 - z * z));
     const deg = this.nodes[id] ? this.nodes[id].degree : 0;
     const dir = [rr * Math.cos(th), z, rr * Math.sin(th)];
-    let r = Math.pow(w, 0.62);
+    let r = Math.pow(w, 0.55); // center-weighted fill, like the north-star
     r *= 1 - 0.30 * Math.min(1, deg / 9); // hubs gravitate to the heart
     if (this.mode === 'unified') {
-      const R = 1.38;
+      const R = 1.15;
       return [dir[0]*r*R, dir[1]*r*R, dir[2]*r*R];
     }
     const lay = this.spaceLayout.get(space) || this.spaceLayout.get(-1)
@@ -609,9 +632,9 @@ export class BrainGL {
   _writeNode(node, fresh) {
     const i = node.id;
     const a = this._anchorFor(i, node.seed, node.space);
-    this.anchors[i*4] = a[0];
-    this.anchors[i*4+1] = a[1];
-    this.anchors[i*4+2] = a[2];
+    this.anchors[i*4] = this._homes[i*4] = a[0];
+    this.anchors[i*4+1] = this._homes[i*4+1] = a[1];
+    this.anchors[i*4+2] = this._homes[i*4+2] = a[2];
     this.anchors[i*4+3] = (node.seed % 6283) / 1000;
     const deg = this.nodes[i] ? this.nodes[i].degree : 0;
     const rnd = seededRand(node.seed ^ 0x9e3779b9);
@@ -684,6 +707,7 @@ export class BrainGL {
     this._spawnPos(i, lay.center);
     this._uploadNode(i);
     this.pulse(i);
+    this._ambientDirty = true;
     this.dirty = true;
   }
 
@@ -710,23 +734,24 @@ export class BrainGL {
     if (this.nodes[id]) this.nodes[id].degree++;
   }
 
-  setEdges(edges) {
+  /// Fill one of the two edge-line vertex-buffer sets (typed | ambient).
+  _fillEdgeStore(store, list) {
     const gl = this.gl;
-    this.edges = edges;
-    const n = edges.length * 2;
-    if (!this.edgeBuf || n > this.edgeCap) {
-      this.edgeCap = Math.max(8192, n * 2);
+    const n = list.length * 2;
+    if (!store.buf || n > store.cap) {
+      store.cap = Math.max(8192, n * 2);
       const mk = (comps) => {
         const b = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, b);
-        gl.bufferData(gl.ARRAY_BUFFER, this.edgeCap * comps * 4, gl.DYNAMIC_DRAW);
+        gl.bufferData(gl.ARRAY_BUFFER, store.cap * comps * 4, gl.DYNAMIC_DRAW);
         return b;
       };
-      this.edgeBuf = { idx: mk(1), other: mk(1), t: mk(1), type: mk(1), spaces: mk(2) };
+      for (const b of Object.values(store.buf || {})) gl.deleteBuffer(b);
+      store.buf = { idx: mk(1), other: mk(1), t: mk(1), type: mk(1), spaces: mk(2) };
     }
     const idx = new Float32Array(n), other = new Float32Array(n), tt = new Float32Array(n),
           ty = new Float32Array(n), sp = new Float32Array(n * 2);
-    edges.forEach((e, k) => {
+    list.forEach((e, k) => {
       const sA = this.state[e.src*2+1], sB = this.state[e.dst*2+1];
       idx[k*2] = e.src;   other[k*2] = e.dst;   tt[k*2] = 0;   ty[k*2] = e.t;
       idx[k*2+1] = e.dst; other[k*2+1] = e.src; tt[k*2+1] = 1; ty[k*2+1] = e.t;
@@ -736,18 +761,99 @@ export class BrainGL {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, arr);
     };
-    up(this.edgeBuf.idx, idx);
-    up(this.edgeBuf.other, other);
-    up(this.edgeBuf.t, tt);
-    up(this.edgeBuf.type, ty);
-    up(this.edgeBuf.spaces, sp);
-    this.edgeCount = n;
+    up(store.buf.idx, idx);
+    up(store.buf.other, other);
+    up(store.buf.t, tt);
+    up(store.buf.type, ty);
+    up(store.buf.spaces, sp);
+    store.count = n;
     this.dirty = true;
+  }
+
+  setEdges(edges) {
+    this.edges = edges;
+    this._typed = this._typed || { buf: null, cap: 0, count: 0 };
+    this._fillEdgeStore(this._typed, edges);
+    this._ambientDirty = true;
+  }
+
+  // The north-star's lattice: k-nearest proximity filaments over the layout.
+  // A render treatment of the point cloud (like the nebula) — anonymous,
+  // faint, non-interactive; the *typed* interlinks above it are the data.
+  _buildAmbient() {
+    this._ambientDirty = false;
+    this._ambient = this._ambient || { buf: null, cap: 0, count: 0 };
+    const N = this.count;
+    const A = this.anchors;
+    const K = N > 6000 ? 2 : 3;
+    const CELL = 0.34, MAXD2 = 0.70 * 0.70;
+    const buckets = new Map();
+    const keyOf = (x, y, z) =>
+      `${Math.floor(x / CELL)},${Math.floor(y / CELL)},${Math.floor(z / CELL)}`;
+    for (let i = 0; i < N; i++) {
+      if (this.state[i*2] < -0.5) continue;
+      const k = keyOf(A[i*4], A[i*4+1], A[i*4+2]);
+      let b = buckets.get(k);
+      if (!b) buckets.set(k, (b = []));
+      b.push(i);
+    }
+    const out = [];
+    const seen = new Set();
+    const best = [];
+    for (let i = 0; i < N; i++) {
+      if (this.state[i*2] < -0.5) continue;
+      const cx = Math.floor(A[i*4] / CELL), cy = Math.floor(A[i*4+1] / CELL),
+            cz = Math.floor(A[i*4+2] / CELL);
+      best.length = 0;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const b = buckets.get(`${cx+dx},${cy+dy},${cz+dz}`);
+        if (!b) continue;
+        for (const j of b) {
+          if (j === i) continue;
+          const ddx = A[i*4]-A[j*4], ddy = A[i*4+1]-A[j*4+1], ddz = A[i*4+2]-A[j*4+2];
+          const d2 = ddx*ddx + ddy*ddy + ddz*ddz;
+          if (d2 > MAXD2) continue;
+          if (best.length < K) {
+            best.push([d2, j]);
+            best.sort((a, b2) => a[0] - b2[0]);
+          } else if (d2 < best[best.length-1][0]) {
+            best[best.length-1] = [d2, j];
+            best.sort((a, b2) => a[0] - b2[0]);
+          }
+        }
+      }
+      for (const [, j] of best) {
+        const key = i < j ? i * 1048576 + j : j * 1048576 + i;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ src: i, dst: j, t: 7 });
+      }
+    }
+    this._fillEdgeStore(this._ambient, out);
   }
 
   addEdge(edge) {
     const gl = this.gl;
-    if (!this.edgeBuf || (this.edges.length + 1) * 2 > this.edgeCap) {
+    // a young memory attaches beside what it links to — the live counterpart
+    // of the snapshot's graph-aware layout
+    const young = (id) => this.meta[id*4] > 0 && this.time - this.meta[id*4] < 120;
+    let move = -1, to = -1;
+    if (young(edge.src) && !young(edge.dst)) { move = edge.src; to = edge.dst; }
+    else if (young(edge.dst) && !young(edge.src)) { move = edge.dst; to = edge.src; }
+    if (move >= 0 && this.state[move*2] > -0.5) {
+      const m = move*4, o = to*4;
+      let dx = this.anchors[m] - this.anchors[o],
+          dy = this.anchors[m+1] - this.anchors[o+1],
+          dz = this.anchors[m+2] - this.anchors[o+2];
+      const L = Math.hypot(dx, dy, dz) || 1;
+      const s = 0.26 / L;
+      this.anchors[m]   = this._homes[m]   = this.anchors[o]   + dx*s;
+      this.anchors[m+1] = this._homes[m+1] = this.anchors[o+1] + dy*s;
+      this.anchors[m+2] = this._homes[m+2] = this.anchors[o+2] + dz*s;
+      this._uploadNode(move);
+    }
+    const st = this._typed;
+    if (!st || !st.buf || (this.edges.length + 1) * 2 > st.cap) {
       this.edges.push(edge);
       return this.setEdges(this.edges);
     }
@@ -758,12 +864,13 @@ export class BrainGL {
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       gl.bufferSubData(gl.ARRAY_BUFFER, k * 2 * comps * 4, new Float32Array(arr));
     };
-    up(this.edgeBuf.idx, 1, [edge.src, edge.dst]);
-    up(this.edgeBuf.other, 1, [edge.dst, edge.src]);
-    up(this.edgeBuf.t, 1, [0, 1]);
-    up(this.edgeBuf.type, 1, [edge.t, edge.t]);
-    up(this.edgeBuf.spaces, 2, [sA, sB, sA, sB]);
-    this.edgeCount = (k + 1) * 2;
+    up(st.buf.idx, 1, [edge.src, edge.dst]);
+    up(st.buf.other, 1, [edge.dst, edge.src]);
+    up(st.buf.t, 1, [0, 1]);
+    up(st.buf.type, 1, [edge.t, edge.t]);
+    up(st.buf.spaces, 2, [sA, sB, sA, sB]);
+    st.count = (k + 1) * 2;
+    this._ambientDirty = true;
     this.dirty = true;
   }
 
@@ -777,11 +884,13 @@ export class BrainGL {
     for (let i = 0; i < this.count; i++) {
       if (this.state[i*2] < -0.5) continue;
       const a = this._anchorFor(i, this._seeds[i], this.nodes[i].space);
-      this.anchors[i*4] = a[0];
-      this.anchors[i*4+1] = a[1];
-      this.anchors[i*4+2] = a[2];
+      this.anchors[i*4] = this._homes[i*4] = a[0];
+      this.anchors[i*4+1] = this._homes[i*4+1] = a[1];
+      this.anchors[i*4+2] = this._homes[i*4+2] = a[2];
     }
+    this._refineAnchors(this.edges);
     this._uploadAll();
+    this._buildAmbient(); // anchors moved — refresh the lattice immediately
     this.dirty = true;
   }
 
@@ -1009,9 +1118,11 @@ export class BrainGL {
 
     const W = this.canvas.width, H = this.canvas.height;
 
-    // 2. nebula at half res, centered on the projected world origin
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.nebFbo);
-    gl.viewport(0, 0, this.nebW, this.nebH);
+    // 2. nebula — full resolution, straight to the backbuffer (the
+    // north-star's filament detail dies under half-res upsampling)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.disable(gl.BLEND);
     gl.useProgram(this.progNebula);
     const c0 = M4.apply(M4.mul(this.proj, this.view), 0, 0, 0);
@@ -1020,27 +1131,20 @@ export class BrainGL {
       c0[3] !== 0 ? c0[1] / c0[3] : 0);
     gl.uniform1f(this.u.nebula.uAspect, W / H);
     gl.uniform1f(this.u.nebula.uTime, this.reduce ? 40.0 : t);
-    gl.uniform1f(this.u.nebula.uInt, 0.55);
-    gl.uniform1f(this.u.nebula.uRad, 1.15 * (5.2 / cam.dist));
+    gl.uniform1f(this.u.nebula.uInt, 0.72);
+    gl.uniform1f(this.u.nebula.uRad, 1.05 * (5.2 / cam.dist));
     this._attrib(this.progNebula, 'aP', this.quad, 2, 0);
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    // 3. composite
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, W, H);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(this.progBlit);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.nebTex);
-    gl.uniform1i(this.u.blit.uTex, 0);
-    this._attrib(this.progBlit, 'aP', this.quad, 2, 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);
 
-    // 4. edges
-    if (this.edgeCount > 0) {
+    // 4. edge web — ambient proximity filaments beneath, typed interlinks on top
+    if (this._ambientDirty && t - (this._ambientAt || -9) > 2.0) {
+      this._buildAmbient();
+      this._ambientAt = t;
+    }
+    if ((this._ambient && this._ambient.count) || (this._typed && this._typed.count)) {
       gl.useProgram(this.progEdge);
       const u = this.u.edge;
       gl.uniformMatrix4fv(u.uProj, false, this.proj);
@@ -1058,12 +1162,18 @@ export class BrainGL {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.anchorTex);
       gl.uniform1i(u.uAnchorTex, 1);
-      this._attrib(this.progEdge, 'aIdx', this.edgeBuf.idx, 1, 0);
-      this._attrib(this.progEdge, 'aOther', this.edgeBuf.other, 1, 0);
-      this._attrib(this.progEdge, 'aT', this.edgeBuf.t, 1, 0);
-      this._attrib(this.progEdge, 'aType', this.edgeBuf.type, 1, 0);
-      this._attrib(this.progEdge, 'aSpaces', this.edgeBuf.spaces, 2, 0);
-      gl.drawArrays(gl.LINES, 0, this.edgeCount);
+      const drawStore = (store, ambient) => {
+        if (!store || !store.count) return;
+        gl.uniform1f(u.uAmbient, ambient);
+        this._attrib(this.progEdge, 'aIdx', store.buf.idx, 1, 0);
+        this._attrib(this.progEdge, 'aOther', store.buf.other, 1, 0);
+        this._attrib(this.progEdge, 'aT', store.buf.t, 1, 0);
+        this._attrib(this.progEdge, 'aType', store.buf.type, 1, 0);
+        this._attrib(this.progEdge, 'aSpaces', store.buf.spaces, 2, 0);
+        gl.drawArrays(gl.LINES, 0, store.count);
+      };
+      drawStore(this._ambient, 1);
+      drawStore(this._typed, 0);
     }
 
     // 5. points

@@ -88,6 +88,12 @@ zero-config alternative.
   neighborhood highlight on selection, edge pulses when a memory is touched,
   per-space highlight/filter, search (`/`) that dims non-matches, and a detail
   card (summary · typed links you can jump along · revision lineage · tags).
+  The layout is **graph-aware**: a deterministic spring pass pulls linked
+  memories together so real interlinks read as the short local web of the
+  north-star (a live-inserted memory attaches beside what it links to).
+  Beneath the typed layer, faint **proximity filaments** (k-nearest over the
+  layout, the north-star's lattice) are a render treatment like the nebula —
+  colorless, non-interactive, excluded from the legend and the audit.
 - **One brain** — the Sources panel aggregates whoever actually writes
   (`source_client` metadata when present, else the author identity), and every
   filter is derived from the data — nothing is hardcoded.
