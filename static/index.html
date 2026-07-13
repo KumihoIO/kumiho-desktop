@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Kumiho Brain — Memory Terminal</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦊</text></svg>">
+<link rel="stylesheet" href="/static/brain.css">
+</head>
+<body>
+<div class="hud" id="hud">
+  <canvas id="brain" aria-label="Kumiho Brain — a living sphere of glowing memory points; drag to orbit, click a point to inspect it."></canvas>
+  <div id="glfail" hidden>
+    <div class="glfail-inner">
+      <div class="lbl">WEBGL2 UNAVAILABLE</div>
+      <p>Kumiho Brain renders with WebGL2. Enable hardware acceleration or try another browser.</p>
+    </div>
+  </div>
+  <div class="scan" aria-hidden="true"></div>
+  <div class="vig" aria-hidden="true"></div>
+  <div class="frame" aria-hidden="true"></div>
+
+  <header class="bar">
+    <div class="brand">KUMIHO <b>BRAIN</b><small>GRAPH-NATIVE MEMORY TERMINAL</small></div>
+    <div class="lights" role="status">
+      <span class="light" id="li-core">CORE</span>
+      <span class="light" id="li-link">LINK</span>
+      <span class="light" id="li-live">LIVE</span>
+      <span class="mode-toggle" id="modeToggle" title="V — toggle unified / per-space view">
+        <span class="on" data-mode="unified">UNIFIED</span><span data-mode="spaces">SPACES</span>
+      </span>
+    </div>
+    <div class="clock"><span id="clk">--:--:--</span><small id="tenantLine">KUMIHO.IO · SECOND BRAIN</small></div>
+  </header>
+
+  <div class="search">
+    <span class="pr">◇ RECALL ▸</span>
+    <input id="q" placeholder="search memory…" autocomplete="off" spellcheck="false" aria-label="Search memory">
+    <span class="qc" id="qc"></span>
+  </div>
+  <div class="qr" id="qr" role="listbox"></div>
+
+  <aside class="col l">
+    <div class="pnl">
+      <div class="lbl">Memory vitals</div>
+      <div id="vitals"></div>
+    </div>
+    <div class="pnl">
+      <div class="lbl" id="spacesLbl">Spaces</div>
+      <div id="spaces"></div>
+    </div>
+    <div class="pnl">
+      <div class="lbl">Filters</div>
+      <div class="filters" id="kindFilters"></div>
+      <div class="filters" id="srcFilters" style="margin-top:6px"></div>
+    </div>
+    <div class="pnl">
+      <div class="lbl">Interlink types</div>
+      <div id="legend"></div>
+    </div>
+  </aside>
+
+  <aside class="col r">
+    <div class="pnl">
+      <div class="lbl">Recently registered</div>
+      <div id="feed" aria-live="polite"></div>
+    </div>
+    <div class="pnl">
+      <div class="lbl">Sources · one brain</div>
+      <div id="sources"></div>
+    </div>
+    <div class="pnl">
+      <div class="lbl">Top hubs · most linked</div>
+      <div id="hubs"></div>
+    </div>
+  </aside>
+
+  <div class="readout" id="ro">
+    <div class="big" id="roBig">—</div>
+    <div class="sub" id="roSub">CONNECTING…</div>
+  </div>
+
+  <div class="hints">
+    <span><b>DRAG</b> ORBIT</span><span><b>SCROLL</b> ZOOM</span><span><b>CLICK</b> INSPECT</span>
+    <span><b>/</b> SEARCH</span><span><b>V</b> VIEW</span><span><b>ESC</b> CLEAR</span>
+  </div>
+  <div class="brandline">
+    <a href="https://github.com/KumihoIO/kumiho-SDKs/issues/57" rel="noopener">kumiho-SDKs #57</a>
+    · RUST SDK · WEBGL2 · <span id="fps">— FPS</span>
+  </div>
+
+  <div class="detail" id="detail" role="dialog" aria-label="Memory detail">
+    <button class="x" id="dx" aria-label="Close">✕</button>
+    <div class="dk" id="dk"></div>
+    <h3 id="dt"></h3>
+    <p class="ds" id="ds"></p>
+    <div class="dl" id="dl"></div>
+    <div class="dmeta" id="dmeta"></div>
+  </div>
+</div>
+<script type="module" src="/static/brain.js"></script>
+</body>
+</html>
