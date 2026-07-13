@@ -26,6 +26,9 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 const BRAIN_CSS: &str = include_str!("../static/brain.css");
 const BRAIN_JS: &str = include_str!("../static/brain.js");
 const GL_JS: &str = include_str!("../static/gl.js");
+// JWST backdrops (NASA/ESA/CSA/STScI, public domain — credited in gl.js).
+const PILLARS_WEBP: &[u8] = include_bytes!("../static/pillars.webp");
+const SOUTHERN_RING_WEBP: &[u8] = include_bytes!("../static/southern-ring.webp");
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -267,6 +270,29 @@ async fn index(State(app): State<AppState>) -> Response {
 }
 
 async fn static_file(Path(file): Path<String>, State(app): State<AppState>) -> Response {
+    // binary image assets: embedded, disk-overridable, cacheable (they only
+    // change with a release)
+    let image: Option<&'static [u8]> = match file.as_str() {
+        "pillars.webp" => Some(PILLARS_WEBP),
+        "southern-ring.webp" => Some(SOUTHERN_RING_WEBP),
+        _ => None,
+    };
+    if let Some(bytes) = image {
+        let body = match &app.cfg.static_dir {
+            Some(dir) => tokio::fs::read(format!("{dir}/{file}"))
+                .await
+                .unwrap_or_else(|_| bytes.to_vec()),
+            None => bytes.to_vec(),
+        };
+        return (
+            [
+                (header::CONTENT_TYPE, "image/webp".to_string()),
+                (header::CACHE_CONTROL, "public, max-age=604800".to_string()),
+            ],
+            body,
+        )
+            .into_response();
+    }
     let (body, mime) = match file.as_str() {
         "brain.css" => (load_static(&app, "brain.css").await, "text/css"),
         "brain.js" => (load_static(&app, "brain.js").await, "text/javascript"),
