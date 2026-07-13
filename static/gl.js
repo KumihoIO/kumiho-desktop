@@ -86,7 +86,7 @@ void main(){
   vBirth = (iMeta.x > 0.0) ? age : 9.0;
   vSel = sel;
   vCore = 0.55 + 0.45*iMeta.w;
-  float px = iMeta.z * (0.95 + 0.40*pulse + pop*2.0 + sel*1.6) * uPixelScale * 4.4 / dist;
+  float px = iMeta.z * (0.95 + 0.40*pulse + pop*2.0 + sel*1.6) * uPixelScale * 3.9 / dist;
   px = clamp(px, 1.5, 220.0);
   vec4 clip = uProj * view;
   clip.xy += aCorner * (px * 2.0 / uViewport) * clip.w;
@@ -104,7 +104,7 @@ void main(){
   float d = dot(vC, vC);
   if (d > 1.0) discard;
   float core = pow(max(0.0, 1.0 - d), 6.0) * (1.1 + vCore);
-  float halo = pow(max(0.0, 1.0 - d), 1.7) * 0.50;
+  float halo = pow(max(0.0, 1.0 - d), 2.2) * 0.30;
   float r = sqrt(d);
   float ring = 0.0;
   if (vBirth < 1.6) {
@@ -211,7 +211,14 @@ void main(){
   vec3 outer = vec3(0.94, 0.46, 0.18);
   vec3 core  = vec3(0.34, 0.62, 1.00);
   vec3 col = mix(outer, core, inner) * dens;
-  col += vec3(0.72, 0.84, 1.0) * smoothstep(0.10, 0.0, r) * 0.9;
+  col += vec3(0.72, 0.84, 1.0) * smoothstep(0.05, 0.0, r) * 1.2;
+  // scope sight-lines through the core — the targeting-terminal signature.
+  // (width is ~2x the reference: this pass renders at half resolution)
+  float sp = (smoothstep(0.006, 0.0, abs(d.x)) + smoothstep(0.006, 0.0, abs(d.y)))
+           * smoothstep(0.34, 0.0, r);
+  col += vec3(0.82, 0.90, 1.0) * sp * 0.65;
+  // clear the lower band so the perspective floor grid reads
+  col *= mix(1.0, 0.40, smoothstep(-0.45, -1.0, vC.y));
   frag = vec4(col * uInt, 1.0);
 }`;
 
@@ -242,7 +249,7 @@ void main(){
   vec3 world = (uStateless > 0.5) ? drift(iAnchor.xyz, iAnchor.w, uTime) : iPos.xyz;
   vec4 view = uView * vec4(world, 1.0);
   float dist = max(0.6, -view.z);
-  float px = clamp(iMeta.z * 1.35 * uPixelScale * 4.4 / dist, 3.0, 60.0);
+  float px = clamp(iMeta.z * 1.35 * uPixelScale * 3.9 / dist, 3.0, 60.0);
   vec4 clip = uProj * view;
   clip.xy += aCorner * (px * 2.0 / uViewport) * clip.w;
   gl_Position = clip;
@@ -964,7 +971,7 @@ export class BrainGL {
       }
     }
     this.view = M4.mul(
-      M4.mul(M4.translate(0, 0.10, -cam.dist), M4.rotX(cam.pitch)),
+      M4.mul(M4.translate(0, 0.22, -cam.dist), M4.rotX(cam.pitch)),
       M4.rotY(cam.yaw));
 
     if (this.reduce && !this.dirty) return;

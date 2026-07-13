@@ -533,7 +533,8 @@ $('dx').addEventListener('click', () => { closeDetail(); gl.ok && gl.select(-1);
 function tick() {
   const d = new Date();
   const p = (n) => (n < 10 ? '0' : '') + n;
-  $('clk').textContent = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  $('clk').textContent = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 tick();
 setInterval(tick, 1000);

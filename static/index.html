@@ -17,6 +17,7 @@
       <p>Kumiho Brain renders with WebGL2. Enable hardware acceleration or try another browser.</p>
     </div>
   </div>
+  <div class="floor" aria-hidden="true"></div>
   <div class="scan" aria-hidden="true"></div>
   <div class="vig" aria-hidden="true"></div>
   <div class="frame" aria-hidden="true"></div>
@@ -31,7 +32,7 @@
         <span class="on" data-mode="unified">UNIFIED</span><span data-mode="spaces">SPACES</span>
       </span>
     </div>
-    <div class="clock"><span id="clk">--:--:--</span><small id="tenantLine">KUMIHO.IO · SECOND BRAIN</small></div>
+    <div class="tenant" id="tenantLine">KUMIHO.IO · SECOND BRAIN</div>
   </header>
 
   <div class="search">
@@ -85,9 +86,9 @@
     <span><b>DRAG</b> ORBIT</span><span><b>SCROLL</b> ZOOM</span><span><b>CLICK</b> INSPECT</span>
     <span><b>/</b> SEARCH</span><span><b>V</b> VIEW</span><span><b>ESC</b> CLEAR</span>
   </div>
-  <div class="brandline">
-    <a href="https://github.com/KumihoIO/kumiho-SDKs/issues/57" rel="noopener">kumiho-SDKs #57</a>
-    · RUST SDK · WEBGL2 · <span id="fps">— FPS</span>
+  <div class="corner-bl">
+    <div class="clockline" id="clk">---- -- -- --:--:--</div>
+    <div class="brandline">RUST SDK · WEBGL2 · <span id="fps">— FPS</span></div>
   </div>
 
   <div class="detail" id="detail" role="dialog" aria-label="Memory detail">
