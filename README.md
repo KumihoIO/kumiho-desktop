@@ -8,6 +8,8 @@ DECISION.VAULT prototype and the `docs/design/kumiho-brain-northstar.html`
 look & feel into a live product. **No mock data anywhere** — everything on
 screen is read from a real tenant through the Rust `kumiho` SDK.
 
+![Kumiho Brain — the living memory graph rendered as a glowing nebula of memory points, streamed live from a real tenant through the Rust kumiho SDK](docs/kumiho-brain.png)
+
 ```
 dashboard/
   src/            Rust backend — axum + tokio + the `kumiho` crate (rust/)
