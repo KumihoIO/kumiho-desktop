@@ -544,6 +544,7 @@ $('modeToggle').addEventListener('click', () => setMode(gl.mode === 'unified' ? 
 function setMode(mode) {
   if (!gl.ok) return;
   gl.setMode(mode);
+  document.body.classList.toggle('spaceview', mode === 'spaces'); // opaque panels over the JWST backdrop
   for (const el of $('modeToggle').querySelectorAll('[data-mode]')) {
     el.classList.toggle('on', el.dataset.mode === mode);
   }

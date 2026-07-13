@@ -125,6 +125,7 @@ in float aType;    // edge-type palette index
 in vec2 aSpaces;   // space ids of (src, dst)
 uniform sampler2D uPosTex;
 uniform sampler2D uAnchorTex;
+uniform sampler2D uMatchTex;   // per-node search/filter match flag (0 or 1)
 uniform mat4 uProj, uView;
 uniform float uTime, uSearch, uSel, uSpaceHi, uStateless;
 uniform float uAmbient;       // 1 = proximity filament layer (render texture,
@@ -143,6 +144,10 @@ vec3 nodePos(float idx){
   }
   return texelFetch(uPosTex, uv, 0).xyz;
 }
+float nodeMatch(float idx){
+  int i = int(idx + 0.5);
+  return texelFetch(uMatchTex, ivec2(i & ${POS_TEX_W - 1}, i >> 10), 0).r;
+}
 void main(){
   vec3 world = nodePos(aIdx);
   vec3 other = nodePos(aOther);
@@ -155,7 +160,10 @@ void main(){
   float lfog = mix(0.28, 1.0, smoothstep(1.5, 0.45, len));
   float shim = 0.55 + 0.45*sin(uTime*0.7 + (aIdx + aOther)*0.37);
   float hi = (1.0 - uAmbient) * ((abs(aIdx - uSel) < 0.5 || abs(aOther - uSel) < 0.5) ? 1.0 : 0.0);
-  float on = (uSearch > 0.5) ? mix(0.22, 0.05, uAmbient) : 1.0;
+  // during a filter, keep edges whose BOTH endpoints match (the interlinks
+  // inside the selection) lit; fade the rest right back
+  float both = step(0.5, nodeMatch(aIdx)) * step(0.5, nodeMatch(aOther));
+  float on = (uSearch > 0.5) ? (both > 0.5 ? mix(1.0, 0.55, uAmbient) : 0.05) : 1.0;
   if (uSpaceHi > -0.5) on *= (abs(aSpaces.x - uSpaceHi) < 0.5 && abs(aSpaces.y - uSpaceHi) < 0.5) ? 1.0 : 0.10;
   vCol = mix(uTypeCol[int(aType + 0.5)], vec3(0.74, 0.82, 0.98), uAmbient);
   float base = mix(0.16 + 0.11*shim, 0.105 + 0.07*shim, uAmbient);
@@ -192,7 +200,12 @@ precision highp float;
 in vec2 vC;
 out vec4 frag;
 uniform vec2 uCenter;
-uniform float uAspect, uTime, uInt, uRad;
+uniform float uAspect, uTime, uInt, uRad, uSpaces;
+uniform sampler2D uFieldTex;   // JWST Pillars image, shown in spaces mode
+uniform float uFieldReady;     // 1 once the image texture has loaded
+uniform sampler2D uOrbTex;     // JWST Southern Ring image, shown in unified mode
+uniform float uOrbReady;
+uniform float uFieldAspect, uOrbAspect;  // image w/h, for aspect-preserving cover fit
 float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vn(vec2 p){
   vec2 i = floor(p), f = fract(p);
@@ -204,28 +217,69 @@ float fbm(vec2 p){
   for (int k = 0; k < 5; k++){ v += a*vn(p); p = p*2.03 + vec2(17.3, 9.1); a *= 0.5; }
   return v;
 }
+// aspect-preserving 'cover' fit: fills the viewport, crops overflow, no stretch
+vec2 cover(vec2 uv, float ia){
+  float sc = max(uAspect / ia, 1.0);
+  return (uv - 0.5) * (vec2(uAspect, 1.0) / (vec2(ia, 1.0) * sc)) + 0.5;
+}
 void main(){
   vec2 d = vC - uCenter;
   d.x *= uAspect;
   float r = length(d);
-  // north-star gas recipe: one domain warp over fbm filaments, slow churn
-  vec2 np = d * 2.4;
-  float warp = fbm(np*1.3 + uTime*0.02);
-  float n = fbm(np + warp*1.4 + vec2(0.0, uTime*0.012));
-  float env = smoothstep(uRad, 0.11, r);
-  float dens = env * (0.24 + 0.76*n);
-  float inner = smoothstep(0.46, 0.02, r);
-  vec3 outer = vec3(1.00, 0.52, 0.22);
-  vec3 core  = vec3(0.40, 0.74, 1.00);
+  // spaces deep-field ('Pillars of Creation' feel): sculptural rust-dust
+  // columns with warm star-formation rims over a blue-teal star field — the
+  // synapse<->cosmos look; blended in by uSpaces for a smooth crossfade
+  vec3 col2;
+  {
+    vec2 pp = vC * vec2(uAspect, 1.0);
+    // vertically-streaked density -> finger-like columns (low X-freq stretch)
+    float w = fbm(vec2(pp.x * 1.3, pp.y * 0.5) + vec2(0.0, uTime * 0.010));
+    float ds = fbm(vec2(pp.x * 2.0 + w * 0.7, pp.y * 0.75 + w * 1.3 + uTime * 0.004));
+    // pillars rise from the bottom into the mid-frame, concentrated centrally
+    float env = smoothstep(0.45, -1.0, vC.y) * smoothstep(1.5, 0.15, abs(pp.x));
+    float pillar = smoothstep(0.44, 0.70, ds) * env;   // rust column bodies
+    float rim = smoothstep(0.34, 0.44, ds) * (1.0 - smoothstep(0.54, 0.74, ds)) * env;
+    col2 = vec3(0.02, 0.05, 0.12)                       // deep blue field
+         + vec3(0.34, 0.22, 0.13) * pillar * 1.30        // rust columns (visible)
+         + vec3(1.00, 0.60, 0.30) * rim * 0.95           // warm star-forming rim
+         + vec3(0.07, 0.17, 0.36) * (1.0 - pillar) * fbm(pp * 1.0 + 4.0) * 0.18; // faint haze
+    vec2 gp = pp * 9.0, gi = floor(gp), gf = fract(gp) - 0.5;
+    float sb = max(0.0, h21(gi) - 0.86) / 0.14;
+    float star = smoothstep(0.05 * sb + 0.004, 0.0, length(gf)) * sb;
+    star += smoothstep(0.45, 0.0, abs(gf.x)) * smoothstep(0.014, 0.0, abs(gf.y)) * sb * 0.55;
+    star += smoothstep(0.45, 0.0, abs(gf.y)) * smoothstep(0.014, 0.0, abs(gf.x)) * sb * 0.55;
+    col2 += vec3(0.80, 0.88, 1.0) * star * (1.0 - pillar * 0.85); // stars dimmed in the columns
+    // real JWST 'Pillars of Creation' image (NASA/ESA/CSA/STScI, public domain)
+    // when it has loaded; the procedural pillars above are the graceful fallback
+    vec3 img = texture(uFieldTex, cover(vec2(vC.x * 0.5 + 0.5, 0.5 - vC.y * 0.5), uFieldAspect)).rgb;
+    col2 = mix(col2, img * 0.70, uFieldReady); // dim so the graph reads on top
+  }
+  // north-star gas: one domain warp over fbm filaments, slow churn — gentler
+  // contrast so it reads as luminous gas, not muddy noise
+  vec2 np = d * 2.2;
+  float warp = fbm(np*1.2 + uTime*0.015);
+  float n = fbm(np + warp*1.1 + vec2(0.0, uTime*0.010));
+  float env = smoothstep(uRad, 0.06, r);
+  float dens = env * (0.52 + 0.48*n);
+  // two-temperature body: warm halo outside, a wide cool-blue core
+  float inner = smoothstep(0.72, 0.0, r);
+  vec3 outer = vec3(0.92, 0.46, 0.20);
+  vec3 core  = vec3(0.34, 0.64, 1.00);
   vec3 col = mix(outer, core, inner) * dens;
-  col += vec3(0.78, 0.90, 1.0) * smoothstep(0.05, 0.0, r) * 1.7;
-  // scope sight-lines through the core — the targeting-terminal signature
-  float sp = (smoothstep(0.0026, 0.0, abs(d.x)) + smoothstep(0.0026, 0.0, abs(d.y)))
-           * smoothstep(0.30, 0.0, r);
-  col += vec3(0.82, 0.90, 1.0) * sp * 0.55;
+  // soft blue-white bloom at the heart — a gentle rise, never a blown dot
+  col += vec3(0.50, 0.70, 1.00) * smoothstep(0.20, 0.0, r) * 0.40;
+  // faint scope sight-lines — keep the terminal signature, but subtle
+  float sp = (smoothstep(0.0022, 0.0, abs(d.x)) + smoothstep(0.0022, 0.0, abs(d.y)))
+           * smoothstep(0.24, 0.0, r);
+  col += vec3(0.70, 0.82, 1.0) * sp * 0.22;
   // clear the lower band so the perspective floor grid reads
   col *= mix(1.0, 0.5, smoothstep(-0.45, -1.0, vC.y));
-  frag = vec4(col * uInt, 1.0);
+  // unified orb gets the real Southern Ring nebula once it loads (dimmed more —
+  // the graph orb is dense in the centre); the procedural glow is the fallback
+  vec3 orb = texture(uOrbTex, cover(vec2(vC.x * 0.5 + 0.5, 0.5 - vC.y * 0.5), uOrbAspect)).rgb;
+  col = mix(col, orb * 0.55, uOrbReady);
+  // crossfade unified radial glow <-> spaces deep-field
+  frag = vec4(mix(col, col2, clamp(uSpaces, 0.0, 1.0)) * uInt, 1.0);
 }`;
 
 const PICK_VS = `#version 300 es
@@ -356,6 +410,11 @@ export class BrainGL {
     this.reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.stateless = this.reduce ? 1 : 0;
     this.mode = 'unified';
+    this._spacesMix = 0; // 0=unified .. 1=spaces, eased for a smooth backdrop crossfade
+    this._fieldReady = 0; // 1 once the Pillars image texture has loaded
+    this._orbReady = 0;   // 1 once the Southern Ring image texture has loaded
+    this._fieldAspect = 1.5;   // overwritten with the real w/h on image load
+    this._orbAspect = 1.07;
     this.sel = -1;
     this.searchActive = 0;
     this.spaceHi = -1;
@@ -370,7 +429,7 @@ export class BrainGL {
     this.onfps = null;
     this.onclickNode = null;
 
-    this.cam = { yaw: 0.6, pitch: 0.24, dist: 5.2, vyaw: 0, vpitch: 0, auto: 0.05,
+    this.cam = { yaw: 0.6, pitch: 0.24, dist: 5.2, vyaw: 0, vpitch: 0, auto: 0.02,
                  tyaw: null, tpitch: null, tdist: null, lastInput: -10 };
 
     this.count = 0;
@@ -415,6 +474,15 @@ export class BrainGL {
     this.pickFbo = gl.createFramebuffer();
     this.posTex = gl.createTexture();
     this.anchorTex = gl.createTexture();
+    this.matchTex = gl.createTexture();
+    this.fieldTex = gl.createTexture();
+    this.orbTex = gl.createTexture();
+    for (const t of [this.fieldTex, this.orbTex]) {
+      gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([8, 16, 36, 255]));
+    }
+    this._loadTex('/static/pillars.webp', 'fieldTex', '_fieldReady', '_fieldAspect');   // spaces backdrop
+    this._loadTex('/static/southern-ring.webp', 'orbTex', '_orbReady', '_orbAspect');   // unified orb backdrop
 
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
@@ -450,6 +518,24 @@ export class BrainGL {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.pickTex, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.dirty = true;
+  }
+
+  _loadTex(url, texProp, readyProp, aspectProp) {
+    const gl = this.gl;
+    const img = new Image();
+    img.onload = () => {
+      gl.bindTexture(gl.TEXTURE_2D, this[texProp]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      this[aspectProp] = (img.naturalWidth || 1) / (img.naturalHeight || 1);
+      this[readyProp] = 1;
+      this.dirty = true;
+    };
+    img.onerror = () => { /* keep the procedural fallback */ };
+    img.src = url;
   }
 
   _allocParticles(cap) {
@@ -504,6 +590,17 @@ export class BrainGL {
     };
     f32tex(this.posTex);
     f32tex(this.anchorTex);
+
+    // per-node match flag (R8, id-indexed) the edge shader samples; all-match
+    // by default so edges show fully until a filter narrows the set
+    gl.bindTexture(gl.TEXTURE_2D, this.matchTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, POS_TEX_W, rows, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this._matchPx = new Uint8Array(POS_TEX_W * rows).fill(255);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, POS_TEX_W, rows, gl.RED, gl.UNSIGNED_BYTE, this._matchPx);
 
     // TF objects: tfoA owns (posA, velA); tfoB owns (posB, velB).
     this.tfoA = gl.createTransformFeedback();
@@ -595,8 +692,10 @@ export class BrainGL {
       const rr = Math.sqrt(Math.max(0, 1 - y * y));
       const th = golden * i;
       return {
-        center: [Math.cos(th) * rr * 1.6, y * 1.3, Math.sin(th) * rr * 1.6],
-        radius: 0.28 + 0.62 * Math.cbrt(count / maxN),
+        // spread the space centres wider and keep each cluster tighter so the
+        // spheres read as distinct clumps instead of one loose scatter
+        center: [Math.cos(th) * rr * 2.0, y * 1.55, Math.sin(th) * rr * 2.0],
+        radius: 0.22 + 0.46 * Math.cbrt(count / maxN),
       };
     };
     clusters.forEach(([sid, c], i) => this.spaceLayout.set(sid, place(i, c)));
@@ -640,7 +739,8 @@ export class BrainGL {
     const rnd = seededRand(node.seed ^ 0x9e3779b9);
     this.meta[i*4] = fresh ? this.time : -1;
     this.meta[i*4+1] = node.kind === 'code' ? 1 : 0;
-    this.meta[i*4+2] = 2.6 + Math.min(3.6, Math.sqrt(deg + 1) * 1.1) + rnd() * 0.9;
+    // wide size spread so degree reads: small nodes stay small, hubs bulk up
+    this.meta[i*4+2] = 1.6 + Math.min(6.4, Math.pow(deg, 0.62) * 1.65) + rnd() * 0.6;
     this.meta[i*4+3] = rnd();
     this.state[i*2] = 1;
     this.state[i*2+1] = node.space;
@@ -903,6 +1003,13 @@ export class BrainGL {
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.stateBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.state.subarray(0, this.count * 2));
+    // mirror the per-node match into the edge shader's id-indexed lookup, so
+    // edges within the matched set stay lit while the rest fade
+    const m = this._matchPx;
+    m.fill(255);
+    if (flags) for (let i = 0; i < this.count; i++) if (!flags[i]) m[i] = 0;
+    gl.bindTexture(gl.TEXTURE_2D, this.matchTex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, POS_TEX_W, this.texRows, gl.RED, gl.UNSIGNED_BYTE, m);
     this.dirty = true;
   }
 
@@ -1131,8 +1238,28 @@ export class BrainGL {
       c0[3] !== 0 ? c0[1] / c0[3] : 0);
     gl.uniform1f(this.u.nebula.uAspect, W / H);
     gl.uniform1f(this.u.nebula.uTime, this.reduce ? 40.0 : t);
-    gl.uniform1f(this.u.nebula.uInt, 0.72);
-    gl.uniform1f(this.u.nebula.uRad, 1.05 * (5.2 / cam.dist));
+    // in 'spaces' mode the constellation fans out into separate clusters, so
+    // the single central orb-glow is dimmed to a wide ambient wash instead of
+    // a dominant blob
+    // ease the unified<->spaces backdrop so the mode switch crossfades instead
+    // of popping (nodes already spring + camera eases; this matches them)
+    const target = this.mode === 'spaces' ? 1 : 0;
+    this._spacesMix += (target - this._spacesMix) * (1 - Math.exp(-dt * 2.4));
+    const sm = this._spacesMix;
+    if (sm > 0.001 && sm < 0.999) this.dirty = true;
+    gl.uniform1f(this.u.nebula.uSpaces, sm);
+    gl.uniform1f(this.u.nebula.uInt, 0.72 + 0.10 * sm);
+    gl.uniform1f(this.u.nebula.uRad, (1.05 + 0.50 * sm) * (5.2 / cam.dist));
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.fieldTex);
+    gl.uniform1i(this.u.nebula.uFieldTex, 0);
+    gl.uniform1f(this.u.nebula.uFieldReady, this._fieldReady);
+    gl.uniform1f(this.u.nebula.uFieldAspect, this._fieldAspect);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.orbTex);
+    gl.uniform1i(this.u.nebula.uOrbTex, 1);
+    gl.uniform1f(this.u.nebula.uOrbReady, this._orbReady);
+    gl.uniform1f(this.u.nebula.uOrbAspect, this._orbAspect);
     this._attrib(this.progNebula, 'aP', this.quad, 2, 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
@@ -1162,6 +1289,9 @@ export class BrainGL {
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, this.anchorTex);
       gl.uniform1i(u.uAnchorTex, 1);
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, this.matchTex);
+      gl.uniform1i(u.uMatchTex, 2);
       const drawStore = (store, ambient) => {
         if (!store || !store.count) return;
         gl.uniform1f(u.uAmbient, ambient);
