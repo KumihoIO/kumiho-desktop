@@ -6,7 +6,9 @@
 //! `get_edges` over the newest revisions, all under bounded concurrency.
 
 use crate::config::Config;
-use crate::model::{item_uri, DetailLink, DetailOut, GraphStore, NodeSeed, TenantOut};
+use crate::model::{
+    item_uri, DetailLink, DetailOut, GraphStore, NodeSeed, RevisionMeta, RevisionOut, TenantOut,
+};
 use futures::stream::{self, StreamExt};
 use kumiho::{Client, EdgeDirection, Item, Revision};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -302,5 +304,65 @@ pub async fn fetch_detail(
         tags,
         links,
         revisions,
+    })
+}
+
+/// The node's item kref, if it exists and is live.
+async fn node_kref(store: &Arc<RwLock<GraphStore>>, id: u32) -> Option<String> {
+    let g = store.read().await;
+    let n = g.nodes.get(id as usize)?;
+    (!n.dead).then(|| n.kref.clone())
+}
+
+/// Revision lineage, newest first — the time-travel index (#65).
+pub async fn fetch_revisions(
+    client: &Client,
+    store: &Arc<RwLock<GraphStore>>,
+    id: u32,
+) -> Option<Vec<RevisionMeta>> {
+    let uri = node_kref(store, id).await?;
+    let kref = kumiho::Kref::unchecked(uri);
+    let mut revs = client.get_revisions(&kref).await.ok()?;
+    revs.sort_unstable_by_key(|r| std::cmp::Reverse(r.number));
+    Some(
+        revs.iter()
+            .map(|r| RevisionMeta {
+                n: r.number,
+                title: meta(r, "title").to_string(),
+                created_at: r.created_at.clone().unwrap_or_default(),
+                latest: r.latest,
+            })
+            .collect(),
+    )
+}
+
+/// One historical revision's content ("what did I used to think?").
+pub async fn fetch_revision(
+    client: &Client,
+    store: &Arc<RwLock<GraphStore>>,
+    id: u32,
+    number: i32,
+) -> Option<RevisionOut> {
+    let uri = node_kref(store, id).await?;
+    let rev = client
+        .get_revision(&format!("{uri}?r={number}"))
+        .await
+        .ok()?;
+    let summary = {
+        let s = meta(&rev, "summary");
+        if s.is_empty() {
+            meta(&rev, "embedding_text")
+        } else {
+            s
+        }
+        .to_string()
+    };
+    Some(RevisionOut {
+        n: rev.number,
+        title: meta(&rev, "title").to_string(),
+        summary,
+        memory_type: meta(&rev, "memory_type").to_string(),
+        tags: rev.tags.clone(),
+        created_at: rev.created_at.clone().unwrap_or_default(),
     })
 }

@@ -31,6 +31,9 @@ const state = {
   filter: { kind: null, source: null, space: null },
   query: '',
   semantic: new Map(), // node id → server-side hybrid-retrieval score (Tier 2)
+  trace: null,         // { label, nodes:Set } — owns the orb spotlight while set (#65)
+  crumbs: [],          // breadcrumb back-trail of node ids
+  pathFrom: null,      // pick-two path mode: origin node id
   feed: [],         // node ids, newest first
   todayCut: Date.now() - 24 * 3600 * 1000,
 };
@@ -50,7 +53,15 @@ if (!gl.ok) {
 } else {
   gl.start();
   gl.onfps = (fps) => { $('fps').textContent = `${fps} FPS`; };
-  gl.onclickNode = (id) => { if (id >= 0) openDetail(id); else { closeDetail(); gl.select(-1); } };
+  gl.onclickNode = (id) => {
+    if (state.pathFrom != null) {
+      if (id >= 0 && id !== state.pathFrom) runPath(state.pathFrom, id);
+      else cancelPathMode();
+      return;
+    }
+    if (id >= 0) openDetail(id);
+    else { closeDetail(); gl.select(-1); }
+  };
 }
 
 // ------------------------------------------------------------------ websocket
@@ -424,6 +435,14 @@ function literalMatch(n, q) {
 
 function applyMatch() {
   if (!gl.ok) return;
+  // an active trace owns the spotlight — the orb is the traversal surface
+  if (state.trace) {
+    const flags = new Float32Array(state.nodes.length);
+    for (const id of state.trace.nodes) flags[id] = 1;
+    gl.setMatch(flags);
+    $('qc').textContent = `${state.trace.label} · ${state.trace.nodes.size} nodes`;
+    return;
+  }
   const q = state.query.trim().toLowerCase();
   const filtering = q || state.filter.kind || state.filter.source != null || state.filter.space != null;
   if (!filtering) {
@@ -551,9 +570,18 @@ function renderSearchResults() {
 
 let detailId = -1;
 
-async function openDetail(id) {
+/// Navigate node→node keeping the breadcrumb trail (trace rows, links, path).
+function jumpDetail(id) {
+  if (detailId >= 0 && detailId !== id) {
+    state.crumbs = [...state.crumbs.filter((c) => c !== id), detailId].slice(-8);
+  }
+  openDetail(id, true);
+}
+
+async function openDetail(id, keepTrail = false) {
   const n = state.nodes[id];
   if (!n) return;
+  if (!keepTrail) state.crumbs = [];
   detailId = id;
   if (gl.ok) gl.focus(id);
   const D = $('detail');
@@ -566,6 +594,9 @@ async function openDetail(id) {
   $('ds').textContent = '…';
   $('dl').innerHTML = '';
   $('dmeta').innerHTML = '';
+  $('dlineage').innerHTML = '';
+  renderCrumbs();
+  renderTrace(id);
   D.classList.add('show');
 
   let d = null;
@@ -586,13 +617,12 @@ async function openDetail(id) {
       <b style="color:${EDGE_HEX[typeIndex(l.type)]}">${esc(l.type)}</b> ${arrow} ${esc(l.title).slice(0, 30)}</span>`;
   }).join('') || '<span class="lk">no interlinks</span>';
   for (const el of $('dl').querySelectorAll('[data-node]')) {
-    el.addEventListener('click', () => openDetail(+el.dataset.node));
+    el.addEventListener('click', () => jumpDetail(+el.dataset.node));
   }
-  const lineage = (d.revisions || []).slice(0, 6).map((r) => `r${r}`).join(' ⟶ ');
+  renderLineageStrip(id, n, d);
   const created = (n.created_at || '').slice(0, 10);
   $('dmeta').innerHTML = [
     `<span>${esc(d.space_path)}</span>`,
-    `<span>${d.revisions?.length || n.revs} revision${(d.revisions?.length || n.revs) === 1 ? '' : 's'}${lineage && (d.revisions?.length || 0) > 1 ? ` · ${lineage}${(d.revisions.length > 6) ? ' ⟶ …' : ''}` : ''}</span>`,
     created ? `<span>since ${created}</span>` : '',
     (d.tags || []).length ? `<span>⚑ ${esc(d.tags.join(' '))}</span>` : '',
   ].filter(Boolean).join('');
@@ -601,8 +631,200 @@ async function openDetail(id) {
 function closeDetail() {
   $('detail').classList.remove('show');
   detailId = -1;
+  state.crumbs = [];
+  cancelPathMode();
+  clearTrace();
 }
 $('dx').addEventListener('click', () => { closeDetail(); gl.ok && gl.select(-1); });
+
+// ------------------------------------------------------- why/impact explorer
+// Graph-native traversal (#65): typed-edge walks over the loaded graph,
+// spotlighted in the orb via the same match texture search uses. Zero LLM.
+
+const TRACE_SECTIONS = [
+  { key: 'why', label: 'WHY', hint: 'what drove this', edges: 'MOTIVATED_BY,DERIVED_FROM', dir: 'out' },
+  { key: 'replaces', label: 'REPLACES', hint: 'superseded beliefs', edges: 'SUPERSEDES', dir: 'out' },
+  { key: 'where', label: 'WHERE', hint: 'anchors · entities', edges: 'IMPLEMENTED_IN,ABOUT', dir: 'out' },
+  { key: 'impact', label: 'IMPACT', hint: 'depends on this', edges: 'DEPENDS_ON,IMPLEMENTED_IN', dir: 'in' },
+];
+let traceOpen = null; // key of the expanded section
+
+function clearTrace() {
+  traceOpen = null;
+  if (state.trace) {
+    state.trace = null;
+    applyMatch();
+  }
+}
+
+/// 1-hop count for a section badge, from the graph already in memory.
+function hopCount(id, sec) {
+  const types = new Set(sec.edges.split(','));
+  let c = 0;
+  for (const e of state.edges) {
+    if (!types.has(e.type)) continue;
+    if (sec.dir === 'out' ? e.src === id : e.dst === id) c++;
+  }
+  return c;
+}
+
+function renderCrumbs() {
+  const parts = state.crumbs.map((cid) =>
+    `<span class="crumb" data-node="${cid}" title="${esc(state.nodes[cid]?.title || '')}">${esc((state.nodes[cid]?.title || '?').slice(0, 18))}</span>`);
+  if (state.pathFrom != null) {
+    parts.push(`<span class="crumb path-hint">⌁ PATH: select a target node in the orb… (Esc cancels)</span>`);
+  }
+  $('dcrumbs').innerHTML = parts.join('<span class="crumb-sep">›</span>');
+  for (const el of $('dcrumbs').querySelectorAll('[data-node]')) {
+    el.addEventListener('click', () => {
+      const cid = +el.dataset.node;
+      state.crumbs = state.crumbs.slice(0, state.crumbs.indexOf(cid));
+      openDetail(cid, true);
+    });
+  }
+}
+
+function renderTrace(id) {
+  traceOpen = null;
+  const secs = TRACE_SECTIONS.map((s) => {
+    const c = hopCount(id, s);
+    return `<div class="tsec" data-sec="${s.key}">
+      <span class="tlabel">${s.label}</span><span class="thint">${s.hint}</span>
+      <span class="tcount">${c > 0 ? c : '—'}</span><span class="tcaret">▸</span>
+    </div><div class="tbody" id="tb-${s.key}"></div>`;
+  }).join('');
+  $('dtrace').innerHTML = secs +
+    `<div class="tsec taction" id="pathBtn"><span class="tlabel">⌁ PATH TO…</span><span class="thint">how is this related to another memory</span></div>
+     <div class="tbody" id="tb-path"></div>`;
+  for (const el of $('dtrace').querySelectorAll('[data-sec]')) {
+    el.addEventListener('click', () => toggleSection(id, el.dataset.sec));
+  }
+  $('pathBtn').addEventListener('click', () => {
+    state.pathFrom = detailId;
+    renderCrumbs();
+  });
+}
+
+async function toggleSection(id, key) {
+  const sec = TRACE_SECTIONS.find((s) => s.key === key);
+  const body = $(`tb-${key}`);
+  if (traceOpen === key) { // collapse
+    body.innerHTML = '';
+    clearTrace();
+    return;
+  }
+  for (const b of $('dtrace').querySelectorAll('.tbody')) b.innerHTML = '';
+  traceOpen = key;
+  body.innerHTML = '<div class="trow dim">…</div>';
+  let d = null;
+  try {
+    const r = await fetch(`/api/traverse?from=${id}&edges=${sec.edges}&dir=${sec.dir}&depth=3`);
+    if (r.ok) d = await r.json();
+  } catch { /* offline */ }
+  if (traceOpen !== key || detailId !== id) return; // user moved on
+  if (!d || !d.nodes.length) {
+    body.innerHTML = `<div class="trow dim">no ${sec.label.toLowerCase()} links in the loaded graph</div>`;
+    clearTrace();
+    traceOpen = key;
+    return;
+  }
+  // spotlight the subgraph in the orb
+  state.trace = { label: sec.label, nodes: new Set([id, ...d.nodes.map((h) => h.id)]) };
+  applyMatch();
+  if (gl.ok) gl.pulse(id);
+  body.innerHTML = d.nodes.map((h) => {
+    const n = state.nodes[h.id];
+    if (!n) return '';
+    return `<div class="trow" data-node="${h.id}" style="padding-left:${8 + (h.hop - 1) * 14}px">
+      <span class="hopmark">${'·'.repeat(h.hop)}</span>
+      <span class="chip ${n.kind === 'code' ? 'k' : 'c'}">${n.kind === 'code' ? 'code' : 'conv'}</span>
+      <span class="tt">${esc(n.title)}</span></div>`;
+  }).join('') + (d.truncated ? '<div class="trow dim">… truncated (bounded walk)</div>' : '');
+  for (const el of body.querySelectorAll('[data-node]')) {
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      jumpDetail(+el.dataset.node);
+    });
+  }
+}
+
+function cancelPathMode() {
+  if (state.pathFrom != null) {
+    state.pathFrom = null;
+    if ($('detail').classList.contains('show')) renderCrumbs();
+  }
+}
+
+async function runPath(from, to) {
+  state.pathFrom = null;
+  let d = null;
+  try {
+    const r = await fetch(`/api/path?from=${from}&to=${to}`);
+    if (r.ok) d = await r.json();
+  } catch { /* offline */ }
+  if (detailId < 0) return;
+  renderCrumbs();
+  const body = $('tb-path');
+  if (!body) return;
+  for (const b of $('dtrace').querySelectorAll('.tbody')) b.innerHTML = '';
+  traceOpen = 'path';
+  if (!d || !d.found) {
+    body.innerHTML = '<div class="trow dim">no connecting chain in the loaded graph</div>';
+    clearTrace();
+    traceOpen = 'path';
+    return;
+  }
+  state.trace = { label: 'PATH', nodes: new Set(d.nodes) };
+  applyMatch();
+  body.innerHTML = d.nodes.map((nid, i) => {
+    const n = state.nodes[nid];
+    const via = i > 0 && d.edges[i - 1]
+      ? `<div class="trow via"><b style="color:${EDGE_HEX[typeIndex(d.edges[i - 1].type)]}">↕ ${esc(d.edges[i - 1].type)}</b></div>`
+      : '';
+    return `${via}<div class="trow" data-node="${nid}">
+      <span class="chip ${n?.kind === 'code' ? 'k' : 'c'}">${n?.kind === 'code' ? 'code' : 'conv'}</span>
+      <span class="tt">${esc(n?.title || '?')}</span></div>`;
+  }).join('');
+  for (const el of body.querySelectorAll('[data-node]')) {
+    el.addEventListener('click', () => jumpDetail(+el.dataset.node));
+  }
+}
+
+// ---- lineage / time-travel ("what did I used to think?")
+function renderLineageStrip(id, n, d) {
+  const count = d.revisions?.length || n.revs;
+  if (count <= 1) { $('dlineage').innerHTML = ''; return; }
+  const revs = (d.revisions || []).slice(0, 12);
+  $('dlineage').innerHTML =
+    `<span class="lin-note">${count} revisions</span>` +
+    revs.map((r, i) => `<span class="lin-chip${i === 0 ? ' on' : ''}" data-rev="${r}">r${r}</span>`).join('<span class="lin-sep">⟵</span>') +
+    (count > revs.length ? '<span class="lin-note">…</span>' : '');
+  for (const el of $('dlineage').querySelectorAll('[data-rev]')) {
+    el.addEventListener('click', () => viewRevision(id, +el.dataset.rev, el));
+  }
+}
+
+async function viewRevision(id, rn, chip) {
+  let d = null;
+  try {
+    const r = await fetch(`/api/revision/${id}?r=${rn}`);
+    if (r.ok) d = await r.json();
+  } catch { /* offline */ }
+  if (detailId !== id || !d) return;
+  for (const el of $('dlineage').querySelectorAll('.lin-chip')) el.classList.toggle('on', +el.dataset.rev === rn);
+  const isLatest = rn === Math.max(...[...$('dlineage').querySelectorAll('.lin-chip')].map((e) => +e.dataset.rev));
+  $('dt').textContent = d.title || state.nodes[id].title;
+  $('ds').textContent = d.summary || '(no summary recorded at this revision)';
+  const old = $('dlineage').querySelector('.lin-banner');
+  if (old) old.remove();
+  if (!isLatest) {
+    const b = document.createElement('span');
+    b.className = 'lin-banner';
+    b.innerHTML = `◷ viewing r${rn} · ${esc((d.created_at || '').slice(0, 10))} — <u>back to latest</u>`;
+    b.addEventListener('click', () => openDetail(id, true));
+    $('dlineage').appendChild(b);
+  }
+}
 
 // ------------------------------------------------------------------ chrome
 
@@ -639,6 +861,8 @@ addEventListener('keydown', (e) => {
     qrSel = -1;
     $('qr').classList.remove('show');
     qInput.blur();
+    cancelPathMode();
+    clearTrace();
     closeDetail();
     if (gl.ok) {
       gl.select(-1);
@@ -668,3 +892,6 @@ addEventListener('keydown', (e) => {
     setMode(gl.mode === 'unified' ? 'spaces' : 'unified');
   }
 });
+
+// Debug/test handle (everything here is already client-inspectable).
+window.kumihoBrain = { state, openDetail, jumpDetail, runPath };

@@ -9,6 +9,7 @@ mod config;
 mod fetch;
 mod live;
 mod model;
+mod trace;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -202,6 +203,10 @@ async fn main() {
         .route("/api/snapshot", get(snapshot))
         .route("/api/search", get(search))
         .route("/api/node/:id", get(node_detail))
+        .route("/api/traverse", get(traverse))
+        .route("/api/path", get(path_between))
+        .route("/api/revisions/:id", get(revisions))
+        .route("/api/revision/:id", get(revision))
         .route("/ws", get(ws_upgrade))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
@@ -464,6 +469,85 @@ async fn node_detail(Path(id): Path<u32>, State(app): State<AppState>) -> Respon
     match fetch::fetch_detail(&app.client, &app.cfg, &app.store, id).await {
         Some(d) => Json(d).into_response(),
         None => (StatusCode::NOT_FOUND, "no such node").into_response(),
+    }
+}
+
+type Params = std::collections::HashMap<String, String>;
+
+fn param_id(params: &Params, key: &str) -> Option<u32> {
+    params.get(key)?.parse().ok()
+}
+
+/// Bounded typed-edge BFS over the loaded graph (the Why/Impact explorer).
+async fn traverse(
+    State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<Params>,
+) -> Response {
+    let Some(from) = param_id(&params, "from") else {
+        return (StatusCode::BAD_REQUEST, "from required").into_response();
+    };
+    let types = trace::parse_types(params.get("edges").map(String::as_str));
+    let dir = trace::Dir::parse(params.get("dir").map(String::as_str));
+    let depth = param_id(&params, "depth").unwrap_or(2);
+    let g = app.store.read().await;
+    if g.nodes.get(from as usize).map(|n| n.dead).unwrap_or(true) {
+        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    }
+    let sub = trace::bfs(
+        &g.edges,
+        |id| g.nodes.get(id as usize).map(|n| n.dead).unwrap_or(true),
+        from,
+        &types,
+        dir,
+        depth,
+        trace::NODE_CAP,
+    );
+    Json(serde_json::json!({ "origin": from, "nodes": sub.nodes, "edges": sub.edges, "truncated": sub.truncated }))
+        .into_response()
+}
+
+/// Undirected shortest chain between two memories ("how are these related?").
+async fn path_between(
+    State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<Params>,
+) -> Response {
+    let (Some(from), Some(to)) = (param_id(&params, "from"), param_id(&params, "to")) else {
+        return (StatusCode::BAD_REQUEST, "from and to required").into_response();
+    };
+    let g = app.store.read().await;
+    let dead = |id: u32| g.nodes.get(id as usize).map(|n| n.dead).unwrap_or(true);
+    if dead(from) || dead(to) {
+        return (StatusCode::NOT_FOUND, "no such node").into_response();
+    }
+    match trace::shortest_path(&g.edges, dead, from, to, 6) {
+        Some((chain, edges)) => {
+            Json(serde_json::json!({ "found": true, "nodes": chain, "edges": edges }))
+                .into_response()
+        }
+        None => Json(serde_json::json!({ "found": false })).into_response(),
+    }
+}
+
+/// Revision lineage for a memory (newest first) — the time-travel index.
+async fn revisions(Path(id): Path<u32>, State(app): State<AppState>) -> Response {
+    match fetch::fetch_revisions(&app.client, &app.store, id).await {
+        Some(revs) => Json(serde_json::json!({ "revisions": revs })).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such node").into_response(),
+    }
+}
+
+/// One historical revision's content ("what did I used to think?").
+async fn revision(
+    Path(id): Path<u32>,
+    State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<Params>,
+) -> Response {
+    let Some(r) = param_id(&params, "r") else {
+        return (StatusCode::BAD_REQUEST, "r required").into_response();
+    };
+    match fetch::fetch_revision(&app.client, &app.store, id, r as i32).await {
+        Some(rev) => Json(rev).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such revision").into_response(),
     }
 }
 

@@ -183,6 +183,40 @@ body{background:var(--bg);overflow:hidden}
 body.spaceview .pnl{background:rgba(9,11,18,.72)}
 body.spaceview .detail{background:rgba(10,12,22,.76)}
 
+
+/* why/impact explorer (#65) */
+.dcrumbs{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:6px;min-height:0}
+.crumb{font-size:9px;letter-spacing:.06em;padding:2px 7px;border:1px solid var(--line2);color:var(--dim);
+  cursor:pointer;border-radius:2px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crumb:hover{color:var(--ink);border-color:var(--line)}
+.crumb.path-hint{color:var(--warn);border-color:rgba(232,195,90,.4);cursor:default}
+.crumb-sep{color:var(--faint);font-size:9px}
+.dtrace{margin-top:10px;border-top:1px solid var(--line2);padding-top:6px;max-height:190px;overflow:auto;scrollbar-width:thin}
+.tsec{display:flex;align-items:baseline;gap:10px;padding:5px 2px;cursor:pointer;user-select:none}
+.tsec:hover .tlabel{color:var(--ink)}
+.tsec .tlabel{font-size:10px;letter-spacing:.18em;color:var(--accent);min-width:86px}
+.tsec .thint{flex:1;font-size:9.5px;letter-spacing:.06em;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tsec .tcount{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
+.tsec .tcaret{color:var(--faint);font-size:9px}
+.tsec.taction .tlabel{color:var(--warn)}
+.tbody{display:flex;flex-direction:column}
+.trow{display:flex;gap:7px;align-items:center;padding:3.5px 2px;cursor:pointer;font-family:var(--sans);
+  font-size:12.5px;color:var(--dim);line-height:1.3}
+.trow:hover{color:var(--ink)}
+.trow.dim{color:var(--faint);cursor:default;font-size:11px}
+.trow.via{cursor:default;padding-left:26px;font-size:9.5px}
+.trow .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trow .hopmark{color:var(--faint);font-size:10px;letter-spacing:2px;min-width:18px}
+.dlineage{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-bottom:7px}
+.lin-chip{font-size:9.5px;padding:2px 7px;border:1px solid var(--line2);color:var(--dim);cursor:pointer;
+  border-radius:2px;font-variant-numeric:tabular-nums}
+.lin-chip:hover{color:var(--ink)}
+.lin-chip.on{color:var(--warn);border-color:rgba(232,195,90,.5)}
+.lin-sep{color:var(--faint);font-size:8px}
+.lin-note{font-size:9px;letter-spacing:.1em;color:var(--faint);text-transform:uppercase}
+.lin-banner{font-size:9.5px;letter-spacing:.08em;color:var(--warn);cursor:pointer;margin-left:8px}
+.lin-banner u{text-decoration-color:rgba(232,195,90,.5)}
+
 @media(prefers-reduced-motion:reduce){.scan{display:none}.feedrow.fresh{animation:none}}
 @media(max-width:1180px){.col{width:300px}}
 @media(max-width:980px){

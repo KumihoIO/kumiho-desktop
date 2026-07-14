@@ -100,6 +100,26 @@ pub struct DetailOut {
     pub revisions: Vec<i32>,
 }
 
+/// One row of a memory's revision lineage (time-travel index).
+#[derive(Debug, Clone, Serialize)]
+pub struct RevisionMeta {
+    pub n: i32,
+    pub title: String,
+    pub created_at: String,
+    pub latest: bool,
+}
+
+/// One historical revision's content ("what did I used to think?").
+#[derive(Debug, Clone, Serialize)]
+pub struct RevisionOut {
+    pub n: i32,
+    pub title: String,
+    pub summary: String,
+    pub memory_type: String,
+    pub tags: Vec<String>,
+    pub created_at: String,
+}
+
 /// One ranked hit from the server-side semantic search (Tier 2).
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
