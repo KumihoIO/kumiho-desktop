@@ -195,6 +195,19 @@ pub async fn load_snapshot(
         node_limit: t.node_limit,
         tenant_id: t.tenant_id,
     });
+    // The SDK bootstrap silently falls back to a loopback CE server when the
+    // stored cloud token can't be loaded (e.g. expired) — make sure looking
+    // at the wrong brain never goes unnoticed.
+    if let Some(t) = &tenant {
+        if t.tenant_id == "self-hosted-ce" && cloud_credentials_present() {
+            tracing::warn!(
+                "connected to a LOCAL self-hosted CE server even though ~/.kumiho cloud \
+                 credentials exist — the stored token may be expired or unreadable \
+                 (run `kumiho-cli login` to restore it). This dashboard is NOT showing \
+                 your cloud brain."
+            );
+        }
+    }
 
     // 4. Apply atomically: nodes first, then edges (endpoints must exist).
     let mut g = store.write().await;
@@ -305,6 +318,21 @@ pub async fn fetch_detail(
         links,
         revisions,
     })
+}
+
+/// Whether a cloud credentials file exists (same location the SDK reads).
+fn cloud_credentials_present() -> bool {
+    let dir = std::env::var("KUMIHO_CONFIG_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+                .join(".kumiho")
+        });
+    dir.join("kumiho_authentication.json").is_file()
 }
 
 /// The node's item kref, if it exists and is live.

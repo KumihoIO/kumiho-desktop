@@ -190,6 +190,7 @@ body.spaceview .detail{background:rgba(10,12,22,.76)}
   cursor:pointer;border-radius:2px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .crumb:hover{color:var(--ink);border-color:var(--line)}
 .crumb.path-hint{color:var(--warn);border-color:rgba(232,195,90,.4);cursor:default}
+.crumb.back{color:var(--warn);border-color:rgba(232,195,90,.4);letter-spacing:.14em;margin-right:4px;cursor:pointer}
 .crumb-sep{color:var(--faint);font-size:9px}
 .dtrace{margin-top:10px;border-top:1px solid var(--line2);padding-top:6px;max-height:190px;overflow:auto;scrollbar-width:thin}
 .tsec{display:flex;align-items:baseline;gap:10px;padding:5px 2px;cursor:pointer;user-select:none}
@@ -229,3 +230,5 @@ body.spaceview .detail{background:rgba(10,12,22,.76)}
   .corner-bl{position:static;margin:8px 12px}
   .detail{position:fixed}
 }
+
+.detail .ds.empty{color:var(--faint)}

@@ -582,6 +582,7 @@ async function openDetail(id, keepTrail = false) {
   const n = state.nodes[id];
   if (!n) return;
   if (!keepTrail) state.crumbs = [];
+  clearTrace(); // a trace is scoped to the node it was expanded from
   detailId = id;
   if (gl.ok) gl.focus(id);
   const D = $('detail');
@@ -609,7 +610,9 @@ async function openDetail(id, keepTrail = false) {
     $('ds').textContent = '(detail unavailable — backend unreachable)';
     return;
   }
-  $('ds').textContent = d.summary || '(no summary recorded)';
+  const hasSum = !!(d.summary && d.summary.trim());
+  $('ds').textContent = hasSum ? d.summary : '—';
+  $('ds').classList.toggle('empty', !hasSum);
   $('dl').innerHTML = (d.links || []).map((l) => {
     const arrow = l.dir === 'out' ? '→' : '←';
     const jump = l.id != null ? ` jump" data-node="${l.id}` : '';
@@ -674,7 +677,18 @@ function renderCrumbs() {
   if (state.pathFrom != null) {
     parts.push(`<span class="crumb path-hint">⌁ PATH: select a target node in the orb… (Esc cancels)</span>`);
   }
-  $('dcrumbs').innerHTML = parts.join('<span class="crumb-sep">›</span>');
+  const back = state.crumbs.length
+    ? '<span class="crumb back" data-back="1" title="back to the previous memory">‹ BACK</span>'
+    : '';
+  $('dcrumbs').innerHTML = back + parts.join('<span class="crumb-sep">›</span>');
+  const backEl = $('dcrumbs').querySelector('[data-back]');
+  if (backEl) {
+    backEl.addEventListener('click', () => {
+      const cid = state.crumbs[state.crumbs.length - 1];
+      state.crumbs = state.crumbs.slice(0, -1);
+      openDetail(cid, true);
+    });
+  }
   for (const el of $('dcrumbs').querySelectorAll('[data-node]')) {
     el.addEventListener('click', () => {
       const cid = +el.dataset.node;
@@ -814,7 +828,9 @@ async function viewRevision(id, rn, chip) {
   for (const el of $('dlineage').querySelectorAll('.lin-chip')) el.classList.toggle('on', +el.dataset.rev === rn);
   const isLatest = rn === Math.max(...[...$('dlineage').querySelectorAll('.lin-chip')].map((e) => +e.dataset.rev));
   $('dt').textContent = d.title || state.nodes[id].title;
-  $('ds').textContent = d.summary || '(no summary recorded at this revision)';
+  const hasSum = !!(d.summary && d.summary.trim());
+  $('ds').textContent = hasSum ? d.summary : '—';
+  $('ds').classList.toggle('empty', !hasSum);
   const old = $('dlineage').querySelector('.lin-banner');
   if (old) old.remove();
   if (!isLatest) {
