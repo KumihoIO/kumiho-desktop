@@ -100,6 +100,15 @@ pub struct DetailOut {
     pub revisions: Vec<i32>,
 }
 
+/// One ranked hit from the server-side semantic search (Tier 2).
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchHit {
+    pub id: u32,
+    pub title: String,
+    pub kind: MemoryClass,
+    pub score: f32,
+}
+
 /// Everything the server pushes over the WebSocket.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "t", rename_all = "snake_case")]

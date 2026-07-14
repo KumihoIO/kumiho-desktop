@@ -200,6 +200,7 @@ async fn main() {
         .route("/static/:file", get(static_file))
         .route("/api/healthz", get(healthz))
         .route("/api/snapshot", get(snapshot))
+        .route("/api/search", get(search))
         .route("/api/node/:id", get(node_detail))
         .route("/ws", get(ws_upgrade))
         .with_state(state)
@@ -379,6 +380,74 @@ async fn snapshot(State(app): State<AppState>) -> Response {
             .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// Tier-2 semantic search: the server's hybrid ranked retrieval
+/// (`Client::search`, the engine behind memory recall) mapped onto loaded
+/// node ids. The frontend unions these with its instant substring tier.
+async fn search(
+    State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let q = params.get("q").map(|s| s.trim()).unwrap_or("");
+    if q.chars().count() < 2 {
+        return Json(serde_json::json!({ "hits": [], "took_ms": 0 })).into_response();
+    }
+    let kinds: Vec<String> = match params.get("kind").map(String::as_str) {
+        Some("conversation") => app.cfg.conv_kinds.clone(),
+        Some("code") => app.cfg.code_kinds.clone(),
+        _ => app.cfg.kinds().cloned().collect(),
+    };
+    let t0 = std::time::Instant::now();
+    let futs = kinds.into_iter().map(|kind| {
+        let client = app.client.clone();
+        let q = q.to_string();
+        async move {
+            client
+                .search(&q, "", &kind, false, false, false, 0.2, Some(24), None)
+                .await
+        }
+    });
+    let pages = futures::future::join_all(futs).await;
+
+    let g = app.store.read().await;
+    let mut best: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+    for page in pages {
+        let page = match page {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!("semantic search page failed: {e}");
+                continue;
+            }
+        };
+        for hit in page {
+            let item = model::item_uri(hit.item.kref.uri()).to_string();
+            if let Some(id) = g.node_id(&item) {
+                let e = best.entry(id).or_insert(hit.score);
+                if hit.score > *e {
+                    *e = hit.score;
+                }
+            }
+        }
+    }
+    let mut hits: Vec<model::SearchHit> = best
+        .into_iter()
+        .filter_map(|(id, score)| {
+            let n = g.nodes.get(id as usize)?;
+            (!n.dead).then(|| model::SearchHit {
+                id,
+                title: n.title.clone(),
+                kind: n.kind,
+                score,
+            })
+        })
+        .collect();
+    drop(g);
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    hits.truncate(40);
+    let took = t0.elapsed().as_millis() as u64;
+    tracing::debug!("semantic search: {} hits in {took} ms", hits.len());
+    Json(serde_json::json!({ "hits": hits, "took_ms": took })).into_response()
 }
 
 async fn node_detail(Path(id): Path<u32>, State(app): State<AppState>) -> Response {

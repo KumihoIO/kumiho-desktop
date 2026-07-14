@@ -30,6 +30,7 @@ const state = {
   linked: false,
   filter: { kind: null, source: null, space: null },
   query: '',
+  semantic: new Map(), // node id → server-side hybrid-retrieval score (Tier 2)
   feed: [],         // node ids, newest first
   todayCut: Date.now() - 24 * 3600 * 1000,
 };
@@ -416,6 +417,11 @@ function matchesFilter(n) {
   return true;
 }
 
+function literalMatch(n, q) {
+  const hay = `${n.title}\n${state.spaces[n.space]?.path || ''}\n${n.item_kind}\n${n.source}\n${n.memory_type}`.toLowerCase();
+  return hay.includes(q);
+}
+
 function applyMatch() {
   if (!gl.ok) return;
   const q = state.query.trim().toLowerCase();
@@ -426,43 +432,113 @@ function applyMatch() {
     return;
   }
   const flags = new Float32Array(state.nodes.length);
-  let hits = 0;
+  let lit = 0, sem = 0;
   for (const n of liveNodes()) {
-    let ok = matchesFilter(n);
-    if (ok && q) {
-      const hay = `${n.title}\n${state.spaces[n.space]?.path || ''}\n${n.item_kind}\n${n.source}\n${n.memory_type}`.toLowerCase();
-      ok = hay.includes(q);
+    if (!matchesFilter(n)) continue;
+    if (!q) {
+      flags[n.id] = 1;
+      lit++;
+      continue;
     }
-    flags[n.id] = ok ? 1 : 0;
-    if (ok) hits++;
+    if (literalMatch(n, q)) {
+      flags[n.id] = 1;
+      lit++;
+    } else if (state.semantic.has(n.id)) {
+      flags[n.id] = 1;
+      sem++;
+    }
   }
   gl.setMatch(flags);
-  $('qc').textContent = `${hits} / ${liveNodes().length}`;
+  $('qc').textContent = q && sem > 0
+    ? `${lit} literal · ${sem} semantic`
+    : `${lit + sem} / ${liveNodes().length}`;
 }
 
+// ---- Tier 2: server-side hybrid retrieval (the memory-recall engine),
+// debounced + abortable, unioned with the instant substring tier.
 const qInput = $('q');
-qInput.addEventListener('input', () => {
-  state.query = qInput.value;
-  applyMatch();
-  renderSearchResults();
-});
+let semTimer = null;
+let semAbort = null;
+let semSeq = 0;
 
-function renderSearchResults() {
-  const q = state.query.trim().toLowerCase();
-  const qr = $('qr');
-  if (!q) {
-    qr.classList.remove('show');
-    qr.innerHTML = '';
+function clearSemantic() {
+  if (semTimer) clearTimeout(semTimer);
+  semTimer = null;
+  if (semAbort) semAbort.abort();
+  semAbort = null;
+  if (state.semantic.size) state.semantic = new Map();
+}
+
+function scheduleSemantic() {
+  if (semTimer) clearTimeout(semTimer);
+  const q = state.query.trim();
+  if (q.length < 2) {
+    clearSemantic();
+    applyMatch();
+    renderSearchResults();
     return;
   }
-  const hits = liveNodes()
-    .filter((n) => matchesFilter(n) && `${n.title}`.toLowerCase().includes(q))
+  semTimer = setTimeout(runSemantic, 250);
+}
+
+async function runSemantic() {
+  const q = state.query.trim();
+  if (q.length < 2) return;
+  if (semAbort) semAbort.abort();
+  semAbort = new AbortController();
+  const seq = ++semSeq;
+  const kind = state.filter.kind ? `&kind=${state.filter.kind}` : '';
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}${kind}`, { signal: semAbort.signal });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (seq !== semSeq || state.query.trim() !== q) return; // stale
+    state.semantic = new Map((d.hits || []).map((h) => [h.id, h.score]));
+    applyMatch();
+    renderSearchResults();
+  } catch { /* aborted or offline — the literal tier stands alone */ }
+}
+
+qInput.addEventListener('input', () => {
+  state.query = qInput.value;
+  qrSel = -1;
+  applyMatch();
+  renderSearchResults();
+  scheduleSemantic();
+});
+
+let qrSel = -1; // keyboard cursor in the dropdown
+
+function searchRows() {
+  const q = state.query.trim().toLowerCase();
+  if (!q) return [];
+  const literal = liveNodes()
+    .filter((n) => matchesFilter(n) && literalMatch(n, q))
     .sort((a, b) => ts(b.updated_at) - ts(a.updated_at))
-    .slice(0, 8);
-  qr.innerHTML = hits.map((n) => `<div class="qrow" data-node="${n.id}">
+    .map((n) => ({ n, sem: false }));
+  const semantic = [...state.semantic.entries()]
+    .map(([id, score]) => ({ n: state.nodes[id], score }))
+    .filter((h) => h.n && matchesFilter(h.n) && !literal.some((l) => l.n.id === h.n.id))
+    .sort((a, b) => b.score - a.score)
+    .map((h) => ({ n: h.n, sem: true }));
+  return [...literal, ...semantic].slice(0, 10); // literal outranks semantic
+}
+
+function renderSearchResults() {
+  const qr = $('qr');
+  const rows = searchRows();
+  if (!rows.length) {
+    qr.classList.remove('show');
+    qr.innerHTML = '';
+    qrSel = -1;
+    return;
+  }
+  if (qrSel >= rows.length) qrSel = rows.length - 1;
+  qr.innerHTML = rows.map(({ n, sem }, i) => `<div class="qrow${i === qrSel ? ' sel' : ''}" data-node="${n.id}">
     <span class="chip ${n.kind === 'code' ? 'k' : 'c'}">${n.kind === 'code' ? 'code' : 'conv'}</span>
-    <span>${esc(n.title)}</span></div>`).join('');
-  qr.classList.toggle('show', hits.length > 0);
+    <span class="qt">${esc(n.title)}</span>${sem ? '<span class="chip s" title="found by semantic recall, not the literal string">sem</span>' : ''}
+  </div>`).join('');
+  qr.classList.add('show');
   for (const el of qr.querySelectorAll('[data-node]')) {
     el.addEventListener('click', () => {
       openDetail(+el.dataset.node);
@@ -551,6 +627,7 @@ function setMode(mode) {
 }
 
 addEventListener('keydown', (e) => {
+  const qrOpen = $('qr').classList.contains('show');
   if (e.key === '/' && document.activeElement !== qInput) {
     e.preventDefault();
     qInput.focus();
@@ -558,6 +635,8 @@ addEventListener('keydown', (e) => {
     qInput.value = '';
     state.query = '';
     state.filter = { kind: null, source: null, space: null };
+    clearSemantic();
+    qrSel = -1;
     $('qr').classList.remove('show');
     qInput.blur();
     closeDetail();
@@ -569,6 +648,22 @@ addEventListener('keydown', (e) => {
     renderFilters();
     renderSpaces();
     renderSources();
+  } else if (qrOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+    e.preventDefault();
+    const rows = searchRows();
+    if (!rows.length) return;
+    qrSel = e.key === 'ArrowDown'
+      ? (qrSel + 1) % rows.length
+      : (qrSel - 1 + rows.length) % rows.length;
+    renderSearchResults();
+  } else if (qrOpen && e.key === 'Enter') {
+    e.preventDefault();
+    const rows = searchRows();
+    const pick = rows[qrSel >= 0 ? qrSel : 0];
+    if (pick) {
+      openDetail(pick.n.id);
+      $('qr').classList.remove('show');
+    }
   } else if ((e.key === 'v' || e.key === 'V') && document.activeElement !== qInput) {
     setMode(gl.mode === 'unified' ? 'spaces' : 'unified');
   }

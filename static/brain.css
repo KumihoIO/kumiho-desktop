@@ -76,6 +76,8 @@ body{background:var(--bg);overflow:hidden}
   align-items:center;font-size:13px;color:var(--dim);font-family:var(--sans)}
 .qrow:last-child{border-bottom:0}
 .qrow:hover{color:var(--ink);background:rgba(174,184,200,.06)}
+.qrow.sel{color:var(--ink);background:rgba(174,184,200,.10)}
+.qrow .qt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* side columns */
 .col{position:absolute;z-index:6;top:124px;width:400px;display:flex;flex-direction:column;gap:12px;
@@ -101,6 +103,7 @@ body{background:var(--bg);overflow:hidden}
 .chip{font-size:11px;letter-spacing:.06em;padding:2px 8px;border:1px solid;border-radius:2px;white-space:nowrap}
 .chip.c{color:var(--conv);border-color:rgba(156,196,242,.4)}
 .chip.k{color:var(--code);border-color:rgba(238,193,142,.5)}
+.chip.s{color:#b9a4ff;border-color:rgba(158,122,255,.45)}
 
 .filters{display:flex;flex-wrap:wrap;gap:6px}
 .fchip{font-size:11.5px;letter-spacing:.05em;padding:4px 10px;border:1px solid var(--line2);color:var(--dim);
