@@ -99,9 +99,8 @@ pub async fn guard(
     }
     if let Some(qk) = query_key(req.uri().query()) {
         if ct_eq(&qk, &key) {
-            let cookie = format!(
-                "{COOKIE_NAME}={key}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000"
-            );
+            let cookie =
+                format!("{COOKIE_NAME}={key}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000");
             // Page navigations redirect so the key leaves the address bar;
             // API/tooling calls pass straight through with the cookie set.
             if req.uri().path() == "/" {

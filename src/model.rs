@@ -114,10 +114,17 @@ pub struct SearchHit {
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum StreamEvent {
     /// First frame on every socket.
-    Hello { proto: u32, server: String },
+    Hello {
+        proto: u32,
+        server: String,
+    },
     /// Upstream/server state: `core` = snapshot loaded, `live` = event stream
     /// connected. `info` is a short human-readable status line.
-    Status { core: bool, live: bool, info: String },
+    Status {
+        core: bool,
+        live: bool,
+        info: String,
+    },
     /// The full graph (sent once per socket after `core` is ready).
     Snapshot {
         /// Unix milliseconds.
@@ -129,11 +136,21 @@ pub enum StreamEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         tenant: Option<TenantOut>,
     },
-    NodeAdded { node: NodeOut },
-    NodeUpdated { node: NodeOut },
-    EdgeAdded { edge: EdgeOut },
-    NodeRemoved { id: u32 },
-    Heartbeat { ts: u64 },
+    NodeAdded {
+        node: NodeOut,
+    },
+    NodeUpdated {
+        node: NodeOut,
+    },
+    EdgeAdded {
+        edge: EdgeOut,
+    },
+    NodeRemoved {
+        id: u32,
+    },
+    Heartbeat {
+        ts: u64,
+    },
 }
 
 /// Fields extracted from an item + its latest revision when (up)serting a node.
@@ -361,6 +378,9 @@ mod tests {
             item_uri("kref://P/s/a.conversation?r=15"),
             "kref://P/s/a.conversation"
         );
-        assert_eq!(item_uri("kref://P/s/a.conversation"), "kref://P/s/a.conversation");
+        assert_eq!(
+            item_uri("kref://P/s/a.conversation"),
+            "kref://P/s/a.conversation"
+        );
     }
 }

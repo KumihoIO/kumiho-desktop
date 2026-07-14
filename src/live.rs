@@ -180,8 +180,12 @@ impl LiveFeed {
         // writers typically attach edges right *after* the revision that
         // triggered this event, which the immediate check cannot see.
         self.diff_edges(&rev.kref).await;
-        let (client, store, tx, kref) =
-            (self.client.clone(), self.store.clone(), self.tx.clone(), rev.kref.clone());
+        let (client, store, tx, kref) = (
+            self.client.clone(),
+            self.store.clone(),
+            self.tx.clone(),
+            rev.kref.clone(),
+        );
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(4)).await;
             let me = LiveEdgeCheck { client, store, tx };
@@ -221,7 +225,11 @@ struct LiveEdgeCheck {
 
 impl LiveEdgeCheck {
     async fn diff(&self, rev_kref: &kumiho::Kref) {
-        let edges = match self.client.get_edges(rev_kref, "", EdgeDirection::Both).await {
+        let edges = match self
+            .client
+            .get_edges(rev_kref, "", EdgeDirection::Both)
+            .await
+        {
             Ok(e) => e,
             Err(e) => {
                 tracing::debug!("live get_edges({rev_kref}): {e}");

@@ -231,7 +231,14 @@ async fn main() {
     };
     let local_url = format!("http://127.0.0.1:{port}");
     print!("\n  🦊🧠  Kumiho Brain — {local_url}");
-    println!("{}", if port != cfg.port { format!("   (port {} was busy)", cfg.port) } else { String::new() });
+    println!(
+        "{}",
+        if port != cfg.port {
+            format!("   (port {} was busy)", cfg.port)
+        } else {
+            String::new()
+        }
+    );
     if let Some(key) = &access_key {
         let host = access::lan_ip()
             .map(|ip| ip.to_string())
@@ -259,7 +266,10 @@ fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let (cmd, args) = ("open", vec![url.to_string()]);
     #[cfg(target_os = "windows")]
-    let (cmd, args) = ("cmd", vec!["/C".into(), "start".into(), String::new(), url.to_string()]);
+    let (cmd, args) = (
+        "cmd",
+        vec!["/C".into(), "start".into(), String::new(), url.to_string()],
+    );
     #[cfg(all(unix, not(target_os = "macos")))]
     let (cmd, args) = ("xdg-open", vec![url.to_string()]);
     let _ = std::process::Command::new(cmd)
@@ -479,7 +489,11 @@ async fn ws_conn(mut socket: WebSocket, app: AppState) {
         .send(Message::Text(send_ev(&StreamEvent::Status {
             core,
             live,
-            info: if core { "ready".into() } else { "syncing memory…".into() },
+            info: if core {
+                "ready".into()
+            } else {
+                "syncing memory…".into()
+            },
         })))
         .await;
 
