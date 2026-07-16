@@ -16,15 +16,46 @@ dashboard/
   static/         WebGL2 frontend — no build step, no external requests
 ```
 
-## Run it
+## Install
 
-One-liner install on any machine with Rust — no protoc, no submodule dance
-(`cargo install` checks the submodule out itself, and the SDK falls back to a
-vendored `protoc` when none is installed):
+**One line, no Rust required** — prebuilt binaries for Linux (x86_64,
+aarch64), macOS (Apple Silicon), and Windows (x86_64):
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KumihoIO/kumiho-SDKs/main/dashboard/scripts/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/KumihoIO/kumiho-SDKs/main/dashboard/scripts/install.ps1 | iex
+```
+
+The installer picks the binary for your platform from the newest
+[`brain-v*` release](https://github.com/KumihoIO/kumiho-SDKs/releases?q=brain-v&expanded=true),
+verifies it against the release's SHA256 checksums before touching your disk,
+and installs a single self-contained file (the frontend is embedded) to
+`~/.kumiho/bin`. Pin a version with `VERSION=v0.1.0` (`$env:KUMIHO_VERSION` on
+Windows); change the destination with `INSTALL_DIR` (`$env:KUMIHO_INSTALL_DIR`).
+
+With Rust installed, `cargo install` works anywhere the prebuilts don't —
+no protoc, no submodule dance (`cargo install` checks the submodule out
+itself, and the SDK falls back to a vendored `protoc` when none is installed):
 
 ```bash
 cargo install --git https://github.com/KumihoIO/kumiho-SDKs kumiho-brain
-kumiho-brain --open        # serves and opens your browser
+```
+
+Maintainers cut a release by pushing a `brain-v*` tag matching
+`dashboard/Cargo.toml` — `.github/workflows/brain-release.yml` builds all four
+platforms, writes `checksums.txt`, and publishes the GitHub release.
+
+## Run it
+
+```bash
+kumiho-brain --open        # serves and opens your browser → http://127.0.0.1:8090
 ```
 
 Or from a clone:
