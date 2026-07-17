@@ -59,14 +59,14 @@ uniform vec2 uViewport;
 uniform float uTime, uSearch, uSel, uSpaceHi, uStateless, uPixelScale;
 out vec2 vC;
 out vec3 vCol;
-out float vGlow, vBirth, vSel, vCore;
+out float vGlow, vBirth, vSel, vCore, vHub;
 ${DRIFT}
 vec3 ambient(float t){
   float a = t*0.10;
   return vec3(1.0) + 0.10*vec3(sin(a), sin(a+2.1), sin(a+4.2));
 }
 void main(){
-  vC = vec2(0.0); vCol = vec3(0.0); vGlow = 0.0; vBirth = 9.0; vSel = 0.0; vCore = 0.0;
+  vC = vec2(0.0); vCol = vec3(0.0); vGlow = 0.0; vBirth = 9.0; vSel = 0.0; vCore = 0.0; vHub = 0.0;
   if (iState.x < -0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   vec3 world = (uStateless > 0.5) ? drift(iAnchor.xyz, iAnchor.w, uTime) : iPos.xyz;
   float age = uTime - iMeta.x;
@@ -86,6 +86,8 @@ void main(){
   vBirth = (iMeta.x > 0.0) ? age : 9.0;
   vSel = sel;
   vCore = 0.55 + 0.45*iMeta.w;
+  // baseSize encodes degree (hubs bulk up); 0 through ~deg 1, 1 at the cap
+  vHub = clamp((iMeta.z - 3.6) / 4.6, 0.0, 1.0);
   float px = iMeta.z * (0.95 + 0.40*pulse + pop*2.0 + sel*1.6) * uPixelScale * 3.9 / dist;
   px = clamp(px, 1.5, 220.0);
   vec4 clip = uProj * view;
@@ -98,13 +100,16 @@ const POINT_FS = `#version 300 es
 precision mediump float;
 in vec2 vC;
 in vec3 vCol;
-in float vGlow, vBirth, vSel, vCore;
+in float vGlow, vBirth, vSel, vCore, vHub;
 out vec4 frag;
 void main(){
   float d = dot(vC, vC);
   if (d > 1.0) discard;
-  float core = pow(max(0.0, 1.0 - d), 6.0) * (1.1 + vCore);
-  float halo = pow(max(0.0, 1.0 - d), 2.2) * 0.30;
+  // hub guard: on big (high-degree) sprites the saturated core region scales
+  // with the quad and reads as a flat white disc; pull the interior down so
+  // hubs stay graded orbs — size, not saturation, carries the degree signal
+  float core = pow(max(0.0, 1.0 - d), 6.0) * (1.1 + vCore) * (1.0 - 0.62 * vHub);
+  float halo = pow(max(0.0, 1.0 - d), 2.2) * 0.30 * (1.0 - 0.40 * vHub);
   float r = sqrt(d);
   float ring = 0.0;
   if (vBirth < 1.6) {
@@ -186,6 +191,10 @@ void main(){
     float p = fract((uTime - uPulse.y) * 0.9);
     a += exp(-pow((vT - p) * 8.0, 2.0)) * vPulse * 1.4;
   }
+  // hub guard: a node's N additive line-ends stack N× brightness on its
+  // pixels, blowing hubs out white; taper each end to zero so the edge hands
+  // off to the node sprite instead of piling on top of it
+  a *= smoothstep(0.0, 0.12, vT) * smoothstep(1.0, 0.88, vT);
   frag = vec4(vCol * a, 1.0);
 }`;
 
