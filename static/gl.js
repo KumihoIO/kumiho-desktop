@@ -88,8 +88,8 @@ void main(){
   vCore = 0.55 + 0.45*iMeta.w;
   // baseSize encodes degree (hubs bulk up); 0 through ~deg 1, 1 at the cap
   vHub = clamp((iMeta.z - 3.6) / 4.6, 0.0, 1.0);
-  float px = iMeta.z * (0.95 + 0.40*pulse + pop*2.0 + sel*1.6) * uPixelScale * 2.8 / dist;
-  px = clamp(px, 1.5, 88.0);
+  float px = iMeta.z * (0.95 + 0.40*pulse + pop*2.0 + sel*1.6) * uPixelScale * 2.3 / dist;
+  px = clamp(px, 1.5, 46.0);
   vec4 clip = uProj * view;
   clip.xy += aCorner * (px * 2.0 / uViewport) * clip.w;
   gl_Position = clip;
@@ -108,8 +108,8 @@ void main(){
   // hub guard: on big (high-degree) sprites the saturated core region scales
   // with the quad and reads as a flat white disc; pull the interior down so
   // hubs stay graded orbs — size, not saturation, carries the degree signal
-  float core = pow(max(0.0, 1.0 - d), 6.0) * (1.1 + vCore) * (1.0 - 0.62 * vHub);
-  float halo = pow(max(0.0, 1.0 - d), 2.2) * 0.17 * (1.0 - 0.40 * vHub);
+  float core = pow(max(0.0, 1.0 - d), 6.0) * (0.8 + 0.45 * vCore) * (1.0 - 0.62 * vHub);
+  float halo = pow(max(0.0, 1.0 - d), 2.2) * 0.12 * (1.0 - 0.40 * vHub);
   float r = sqrt(d);
   float ring = 0.0;
   if (vBirth < 1.6) {
