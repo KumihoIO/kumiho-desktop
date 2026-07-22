@@ -19,6 +19,30 @@ fn port_serving(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
 }
 
+/// Is a working `docker` CLI on PATH (and its daemon reachable enough to answer)?
+fn docker_available() -> bool {
+    command("docker")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Actionable, platform-aware guidance when Docker is needed but missing.
+fn docker_missing_message() -> String {
+    let how = if cfg!(target_os = "linux") {
+        "install it — e.g. `sudo apt install docker.io`, then `sudo systemctl enable --now docker` and `sudo usermod -aG docker $USER` (re-login)"
+    } else if cfg!(target_os = "macos") {
+        "install Docker Desktop from https://www.docker.com/products/docker-desktop and start it"
+    } else {
+        "install Docker Desktop from https://www.docker.com/products/docker-desktop and start it (make sure the whale icon says it's running)"
+    };
+    format!(
+        "Docker isn't installed or running — {how}. \
+         Or run Neo4j 5.x (and optionally Redis) yourself; Kumiho reuses whatever is already listening on those ports."
+    )
+}
+
 fn container_running(name: &str) -> bool {
     command("docker")
         .args(["inspect", "-f", "{{.State.Running}}", name])
@@ -44,11 +68,7 @@ pub struct DockerStatus {
 
 #[tauri::command]
 pub fn docker_status() -> DockerStatus {
-    let available = command("docker")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let available = docker_available();
     // Reachable counts whether it's our container or a pre-existing server.
     DockerStatus {
         available,
@@ -58,7 +78,8 @@ pub fn docker_status() -> DockerStatus {
 }
 
 /// Bring up Neo4j (and optional Redis). If a port is already served, reuse it
-/// instead of creating a conflicting container.
+/// instead of creating a conflicting container. If a DB is actually needed and
+/// Docker isn't available, return actionable guidance rather than a raw error.
 #[tauri::command]
 pub fn docker_up(
     neo4j_port: u16,
@@ -66,11 +87,17 @@ pub fn docker_up(
     neo4j_password: String,
     use_redis: bool,
 ) -> Result<String, String> {
+    let need_neo4j = !port_serving(neo4j_port);
+    let need_redis = use_redis && !port_serving(redis_port);
+
+    // Only require Docker if we actually have to create a container.
+    if (need_neo4j || need_redis) && !docker_available() {
+        return Err(docker_missing_message());
+    }
+
     let mut notes: Vec<String> = Vec::new();
 
-    if port_serving(neo4j_port) {
-        notes.push(format!("Neo4j already serving {neo4j_port} — reusing"));
-    } else {
+    if need_neo4j {
         if neo4j_password.trim().is_empty() {
             return Err("a Neo4j password is required to create the database".into());
         }
@@ -86,12 +113,12 @@ pub fn docker_up(
             ],
         )?;
         notes.push(format!("Neo4j starting on {neo4j_port}"));
+    } else {
+        notes.push(format!("Neo4j already serving {neo4j_port} — reusing"));
     }
 
     if use_redis {
-        if port_serving(redis_port) {
-            notes.push(format!("Redis already serving {redis_port} — reusing"));
-        } else {
+        if need_redis {
             run_or_start(
                 REDIS_CONTAINER,
                 &[
@@ -103,6 +130,8 @@ pub fn docker_up(
                 ],
             )?;
             notes.push(format!("Redis starting on {redis_port}"));
+        } else {
+            notes.push(format!("Redis already serving {redis_port} — reusing"));
         }
     }
 
