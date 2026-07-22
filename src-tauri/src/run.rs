@@ -272,5 +272,16 @@ pub fn brain_stop(state: State<AppState>) -> Result<String, String> {
     if let Some(mut child) = state.brain.lock().map_err(|e| e.to_string())?.take() {
         let _ = child.kill();
     }
+    // Also clear any orphaned Brain (e.g. one left by a previous app session, or
+    // an old one connected to the cloud) so a restart truly frees 8090 and
+    // relaunches in the current mode.
+    #[cfg(windows)]
+    {
+        let _ = command("taskkill").args(["/IM", "kumiho-brain.exe", "/F"]).output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command("pkill").args(["-f", "kumiho-brain"]).output();
+    }
     Ok("brain stopped".into())
 }

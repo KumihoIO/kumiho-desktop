@@ -328,7 +328,9 @@
 
   // ---------- Brain (main view) ----------
   function loadBrain(){ $('brain-frame').src='http://127.0.0.1:8090/?t='+Date.now(); }
-  async function startBrain(){ toast('starting Brain…');
+  async function startBrain(){ toast('restarting Brain…');
+    try{ await invoke('brain_stop'); }catch(e){}
+    await new Promise(r=>setTimeout(r,500));
     try{ await invoke('brain_start'); }catch(e){ toast(String(e),true); }
     const up=await waitFor(()=>invoke('brain_status').then(s=>s.reachable), 20000);
     if(up){ loadBrain(); $('brain-empty').classList.add('hide'); } else { toast('Brain did not start on 8090',true); }
@@ -338,8 +340,7 @@
   function enterApp(){ closeSettings(); $('setup').classList.remove('show'); $('app').style.display='flex';
     $('brand-sub').textContent = MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
     refreshStatus();
-    // Bring the Brain up as the main view.
-    invoke('brain_status').then(s=>{ if(s.reachable){ loadBrain(); $('brain-empty').classList.add('hide'); } else { startBrain(); } }).catch(()=>startBrain());
+    startBrain();   // always launch a fresh, mode-correct Brain (clears any stale/cloud one)
     setInterval(refreshStatus, 5000);
   }
 
