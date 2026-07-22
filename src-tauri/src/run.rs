@@ -218,6 +218,25 @@ pub fn brain_status() -> PortStatus {
     PortStatus { reachable: port_open(BRAIN_PORT), port: BRAIN_PORT }
 }
 
+/// (mode, server_port) from ~/.kumiho/desktop.json (defaults: "", 9190).
+fn desktop_mode_port() -> (String, u16) {
+    let v: Option<serde_json::Value> = kumiho_home()
+        .and_then(|h| std::fs::read_to_string(h.join("desktop.json")).ok())
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let mode = v
+        .as_ref()
+        .and_then(|v| v.get("mode"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    let port = v
+        .as_ref()
+        .and_then(|v| v.get("server_port"))
+        .and_then(|p| p.as_u64())
+        .unwrap_or(9190) as u16;
+    (mode, port)
+}
+
 #[tauri::command]
 pub fn brain_start(state: State<AppState>) -> Result<String, String> {
     if port_open(BRAIN_PORT) {
@@ -225,8 +244,21 @@ pub fn brain_start(state: State<AppState>) -> Result<String, String> {
     }
     let bin = brain_binary()
         .ok_or("kumiho-brain not found in ~/.kumiho/bin — install or build it first")?;
-    let child = command(bin.to_str().ok_or("bad path")?)
-        .args(["--port", &BRAIN_PORT.to_string()])
+    let mut cmd = command(bin.to_str().ok_or("bad path")?);
+    cmd.args(["--port", &BRAIN_PORT.to_string()]);
+
+    // In CE mode, force Brain at the LOCAL server. Otherwise the SDK bootstrap
+    // follows the ambient KUMIHO_AUTH_TOKEN to the cloud tenant and renders cloud
+    // memory instead of the local CE graph.
+    let (mode, server_port) = desktop_mode_port();
+    if mode == "ce" {
+        cmd.arg("--local");
+        cmd.env("KUMIHO_CLAUDE_MODE", "ce");
+        cmd.env("KUMIHO_LOCAL_SERVER_ENDPOINT", format!("127.0.0.1:{server_port}"));
+        cmd.env_remove("KUMIHO_AUTH_TOKEN");
+    }
+
+    let child = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
