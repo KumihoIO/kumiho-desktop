@@ -1,8 +1,8 @@
-# kumiho-desktop — Tauri control-center. Wraps the Brain server (this repo root)
-# and adds the Run/Account/Connect/Upgrade pillars as native commands.
+# kumiho-desktop — Tauri control-center. The Brain graph view (See pillar) is the
+# root kumiho-brain server, spawned as a child process and shown in an iframe;
+# the Run/Account/Connect/Upgrade pillars are native commands here.
 #
-# WIP scaffold: own [workspace] so it stays independent of the root kumiho-brain
-# crate until the axum server is refactored into a lib this app can embed.
+# Own [workspace] so it stays independent of the root kumiho-brain crate.
 [package]
 name = "kumiho-desktop"
 version = "0.1.0"
@@ -16,19 +16,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"           # Run/Connect: spawn CE server + host CLIs
-keyring = "3"                      # Account: cloud token in the OS credential store (verify latest 3.x)
-kumiho = "0.10"                    # SDK from crates.io (P0 gate)
-axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
-tokio-stream = "0.1"
-futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rand = "0.8"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+keyring = "3"   # Account: cloud token in the OS credential store
+dirs = "5"      # locate ~/.kumiho for the Run pillar
 
-# Independent workspace so `cargo check` at the repo root (kumiho-brain) does not
-# try to build this until the Tauri integration lands.
 [workspace]

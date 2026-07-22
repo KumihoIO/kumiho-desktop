@@ -4,15 +4,18 @@
   "version": "0.1.0",
   "identifier": "io.kumiho.desktop",
   "build": {
-    "frontendDist": "../static"
+    "frontendDist": "../desktop-ui"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "Kumiho Desktop",
-        "width": 1280,
-        "height": 800,
-        "url": "http://127.0.0.1:8090"
+        "width": 1200,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600
       }
     ],
     "security": {
@@ -22,6 +25,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.icns", "icons/icon.ico"]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
   }
 }
