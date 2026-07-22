@@ -119,7 +119,7 @@
         <div class="step" data-s="config"><span class="n">3</span> Write config</div>
         <div class="step" data-s="start"><span class="n">4</span> Start the server</div>
       </div>
-      <div class="row" style="margin-top:16px"><button class="primary grow" onclick="setupCE()">Install &amp; start Community Edition</button></div>
+      <div class="row" style="margin-top:16px"><button id="ce-btn" class="primary grow" onclick="setupCE()">Install &amp; start Community Edition</button></div>
       <div class="log" id="ce-log"></div>
     </div>
 
@@ -210,31 +210,49 @@
 
   // ---------- setup ----------
   let picked = null;
-  function pick(m){ picked=m; $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
-    $('ce-form').style.display = m==='ce'?'block':'none'; $('cloud-form').style.display = m==='cloud'?'block':'none'; }
+  async function pick(m){ picked=m; $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
+    $('ce-form').style.display = m==='ce'?'block':'none'; $('cloud-form').style.display = m==='cloud'?'block':'none';
+    if(m==='ce'){ const btn=$('ce-btn'); try{ const st=await invoke('ce_status');
+      if(st.reachable){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
+      else if(btn){ btn.textContent = st.installed ? 'Start Community Edition' : 'Install & start Community Edition'; }
+    }catch(e){} } }
   function markStep(s,cls){ const el=document.querySelector(`#ce-steps .step[data-s="${s}"]`); if(el) el.className='step '+cls; }
 
+  function waitFor(pred, ms){ const t0=Date.now(); return new Promise((resolve)=>{ (function tick(){
+    Promise.resolve().then(pred).then(ok=>{ if(ok) return resolve(true); if(Date.now()-t0>ms) return resolve(false); setTimeout(tick,800); })
+      .catch(()=>{ if(Date.now()-t0>ms) return resolve(false); setTimeout(tick,800); }); })(); }); }
+
+  async function adoptCE(){
+    const cfg={ configured:true, mode:'ce', server_port:+$('f-server').value||9190, neo4j_port:+$('f-neo').value||7687,
+      redis_port:+$('f-redis').value||6379, use_redis:$('f-usered').checked, local_user:$('f-user').value.trim()||'me' };
+    try{ await invoke('desktop_config_set',{cfg}); }catch(e){}
+    MODE='ce'; setLog('ce-log','✓ Community Edition ready. Opening control center…'); setTimeout(enterApp,700);
+  }
+
   async function setupCE(){
+    setLog('ce-log','');
+    // Already installed AND running? Skip the whole flow — just adopt it.
+    let st; try{ st=await invoke('ce_status'); }catch(e){ setLog('ce-log',String(e),true); return; }
+    if(st.reachable){ await adoptCE(); return; }
+    // Bringing it up needs EULA + a Neo4j password (only when creating/configuring).
     if(!$('f-eula').checked){ setLog('ce-log','Please accept the EULA to continue.',true); return; }
     const pass=$('f-pass').value.trim(); if(!pass){ setLog('ce-log','Set a Neo4j password.',true); return; }
     const serverPort=+$('f-server').value||9190, neo4jPort=+$('f-neo').value||7687, redisPort=+$('f-redis').value||6379;
     const useRedis=$('f-usered').checked, localUser=$('f-user').value.trim()||'me';
-    $('ce-steps').style.display='block'; setLog('ce-log','');
+    $('ce-steps').style.display='block';
     try{
       markStep('install','active');
-      const st=await invoke('ce_status');
       if(!st.installed){ setLog('ce-log','Installing CE server…'); await invoke('ce_install'); }
-      markStep('install','done'); markStep('db','active'); setLog('ce-log','Starting Neo4j + Redis in Docker…');
+      markStep('install','done'); markStep('db','active'); setLog('ce-log','Starting Neo4j + Redis in Docker (first run may pull images)…');
       await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis });
       markStep('db','done'); markStep('config','active');
-      await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true });
-      markStep('config','done'); markStep('start','active'); setLog('ce-log','Waiting for Neo4j, then starting the server…');
-      await new Promise(r=>setTimeout(r,6000)); // let Neo4j come up
+      if(!st.configured){ setLog('ce-log','Writing config…');
+        await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true }); }
+      markStep('config','done'); markStep('start','active'); setLog('ce-log','Starting the server, waiting for it to answer on 9190…');
       await invoke('ce_start');
-      markStep('start','done');
-      await invoke('desktop_config_set',{ cfg:{ configured:true, mode:'ce', server_port:serverPort, neo4j_port:neo4jPort, redis_port:redisPort, use_redis:useRedis, local_user:localUser } });
-      setLog('ce-log','✓ Community Edition is starting. Opening control center…');
-      setTimeout(enterApp,1200);
+      const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable), 40000);
+      if(!up){ setLog('ce-log','Server did not answer on 9190 within 40s — check Docker/Neo4j, then use Start again.',true); return; }
+      markStep('start','done'); await adoptCE();
     }catch(e){ setLog('ce-log',String(e),true); }
   }
 
