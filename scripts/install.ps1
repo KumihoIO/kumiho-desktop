@@ -1,7 +1,7 @@
 # Kumiho Brain installer.
 #
 # One-liner:
-#   irm https://raw.githubusercontent.com/KumihoIO/kumiho-SDKs/main/dashboard/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/KumihoIO/kumiho-desktop/main/scripts/install.ps1 | iex
 #
 # Downloads the prebuilt kumiho-brain.exe for Windows x86_64 from the newest
 # brain-v* GitHub release, verifies it against the release checksums
@@ -10,7 +10,7 @@
 #   $env:KUMIHO_VERSION = "v0.1.0"       pin a release (accepts v0.1.0 or brain-v0.1.0)
 #   $env:KUMIHO_INSTALL_DIR = "C:\bin"   override the destination (default ~\.kumiho\bin)
 $ErrorActionPreference = "Stop"
-$Repo = "KumihoIO/kumiho-SDKs"
+$Repo = "KumihoIO/kumiho-desktop"
 $Version = if ($env:KUMIHO_VERSION) { $env:KUMIHO_VERSION } else { "latest" }
 $InstallDir = if ($env:KUMIHO_INSTALL_DIR) { $env:KUMIHO_INSTALL_DIR } else { "$HOME\.kumiho\bin" }
 

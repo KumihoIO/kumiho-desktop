@@ -2,7 +2,7 @@
 # Kumiho Brain installer.
 #
 # One-liner:
-#   curl -fsSL https://raw.githubusercontent.com/KumihoIO/kumiho-SDKs/main/dashboard/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/KumihoIO/kumiho-desktop/main/scripts/install.sh | sh
 #
 # Downloads the prebuilt kumiho-brain binary for this platform from the
 # newest brain-v* GitHub release, verifies it against the release checksums
@@ -12,7 +12,7 @@
 #   INSTALL_DIR=~/bin    override the install destination (default ~/.kumiho/bin)
 set -eu
 
-REPO="KumihoIO/kumiho-SDKs"
+REPO="KumihoIO/kumiho-desktop"
 VERSION="${VERSION:-latest}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.kumiho/bin}"
 

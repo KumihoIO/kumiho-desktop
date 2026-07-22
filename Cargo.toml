@@ -7,10 +7,11 @@ description = "Kumiho Brain — real-time WebGL dashboard for the living Kumiho 
 license = "MIT"
 publish = false
 
-# Dogfoods the Rust SDK (kumiho-SDKs#57): the crate is the only data path to
-# kumiho-server; the dashboard adds an axum web layer + a WebGL2 frontend.
+# The `kumiho` crate is the only data path to kumiho-server; this app adds an
+# axum web layer + a WebGL2 frontend. Consumed from crates.io (carved out of
+# the kumiho-SDKs monorepo, so no longer a path dep).
 [dependencies]
-kumiho = { path = "../rust" }
+kumiho = "0.10"
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-stream = "0.1"

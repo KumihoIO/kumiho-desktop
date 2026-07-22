@@ -832,6 +832,8 @@ dependencies = [
 [[package]]
 name = "kumiho"
 version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0fd8af353b0c00684e909486d8ab22cb33b5cbf18d8624a6b6905b3f84268e5"
 dependencies = [
  "async-stream",
  "base64",

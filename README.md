@@ -24,28 +24,28 @@ aarch64), macOS (Apple Silicon), and Windows (x86_64):
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KumihoIO/kumiho-SDKs/main/dashboard/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/KumihoIO/kumiho-desktop/main/scripts/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/KumihoIO/kumiho-SDKs/main/dashboard/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/KumihoIO/kumiho-desktop/main/scripts/install.ps1 | iex
 ```
 
 The installer picks the binary for your platform from the newest
-[`brain-v*` release](https://github.com/KumihoIO/kumiho-SDKs/releases?q=brain-v&expanded=true),
+[`brain-v*` release](https://github.com/KumihoIO/kumiho-desktop/releases?q=brain-v&expanded=true),
 verifies it against the release's SHA256 checksums before touching your disk,
 and installs a single self-contained file (the frontend is embedded) to
 `~/.kumiho/bin`. Pin a version with `VERSION=v0.1.0` (`$env:KUMIHO_VERSION` on
 Windows); change the destination with `INSTALL_DIR` (`$env:KUMIHO_INSTALL_DIR`).
 
 With Rust installed, `cargo install` works anywhere the prebuilts don't —
-no protoc, no submodule dance (`cargo install` checks the submodule out
-itself, and the SDK falls back to a vendored `protoc` when none is installed):
+the `kumiho` SDK comes from crates.io and falls back to a vendored `protoc`
+when none is installed, so there's no submodule or system-protoc setup:
 
 ```bash
-cargo install --git https://github.com/KumihoIO/kumiho-SDKs kumiho-brain
+cargo install --git https://github.com/KumihoIO/kumiho-desktop kumiho-brain
 ```
 
 Maintainers cut a release by pushing a `brain-v*` tag matching
@@ -61,13 +61,12 @@ kumiho-brain --open        # serves and opens your browser → http://127.0.0.1:
 Or from a clone:
 
 ```bash
-git clone --recurse-submodules https://github.com/KumihoIO/kumiho-SDKs
-cd kumiho-SDKs/dashboard
+git clone https://github.com/KumihoIO/kumiho-desktop
+cd kumiho-desktop
 cargo run -- --open        # → http://127.0.0.1:8090
 ```
 
-(Forgot `--recurse-submodules`? The build tells you the exact command.
-If the default port is busy, the next free one is picked automatically.)
+(If the default port is busy, the next free one is picked automatically.)
 
 Connection follows the standard SDK bootstrap chain: bearer token from
 `~/.kumiho` → control-plane discovery → your cloud tenant; with no token it
@@ -87,9 +86,9 @@ probes a loopback self-hosted CE server. Options:
                        (frontend dev without recompiling)
 ```
 
-System `protoc` is optional (the SDK's default `vendored-protoc` feature
-provides one); in-repo builds need the proto submodule, and the build error
-tells you the exact `git submodule` command if it's missing.
+System `protoc` is optional — the `kumiho` crate's default `vendored-protoc`
+feature provides one, and the SDK is a crates.io dependency, so there's no
+proto submodule to check out.
 
 ### Remote access
 
