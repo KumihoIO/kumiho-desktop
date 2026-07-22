@@ -5,8 +5,8 @@
 //! NOTE: the exact per-host install invocations are first-cut and should be
 //! reconciled with each host's current CLI (marketplace vs. direct install).
 
+use crate::util::command;
 use serde::Serialize;
-use std::process::Command;
 
 #[derive(Serialize)]
 pub struct Host {
@@ -18,7 +18,7 @@ pub struct Host {
 /// Is `cmd` resolvable on PATH? (`where` on Windows, `which` elsewhere.)
 fn on_path(cmd: &str) -> bool {
     let probe = if cfg!(windows) { "where" } else { "which" };
-    Command::new(probe)
+    command(probe)
         .arg(cmd)
         .output()
         .map(|o| o.status.success())
@@ -37,12 +37,12 @@ pub fn connect_hosts() -> Vec<Host> {
 #[tauri::command]
 pub fn connect_install(host: String) -> Result<String, String> {
     let (cmd, args): (&str, &[&str]) = match host.as_str() {
-        "claude" => ("claude", &["plugin", "install", "kumiho-memory"]),
+        "claude" => ("claude", &["plugin", "install", "kumiho-memory@kumiho-plugins"]),
         "codex" => ("codex", &["plugin", "marketplace", "add", "KumihoIO/kumiho-plugins"]),
         "openclaw" => ("openclaw", &["plugins", "install", "kumiho-memory"]),
         other => return Err(format!("unknown host: {other}")),
     };
-    let out = Command::new(cmd)
+    let out = command(cmd)
         .args(args)
         .output()
         .map_err(|e| format!("failed to launch `{cmd}`: {e}"))?;

@@ -1,14 +1,18 @@
 // Kumiho Desktop — control center for Kumiho Memory.
 //
-// v1 architecture: the Brain graph view (See pillar) is the existing kumiho-brain
-// axum server, spawned as a child process and shown in an <iframe>; the other
-// four pillars (Connect / Run / Account / Upgrade) are native Tauri commands.
+// First run shows a setup modal (CE or Cloud). CE: install the server, run
+// Neo4j + Redis in Docker, configure ports, start/stop. Cloud: token to connect.
+// See: the Brain graph view (kumiho-brain spawned as a child, shown in an iframe).
+// Cross-platform (Windows / macOS / Linux) via std process + conditional bits.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod account;
+mod config;
 mod connect;
+mod docker;
 mod run;
 mod upgrade;
+mod util;
 
 use std::sync::Mutex;
 
@@ -22,13 +26,23 @@ fn main() {
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
-            // Run — CE server + Brain lifecycle
+            // First-run + app config
+            config::desktop_config_get,
+            config::desktop_config_set,
+            // Run — CE server lifecycle + Brain
             run::ce_status,
+            run::ce_health,
+            run::ce_install,
+            run::ce_configure,
             run::ce_start,
             run::ce_stop,
             run::brain_status,
             run::brain_start,
             run::brain_stop,
+            // Docker — Neo4j + Redis dependencies
+            docker::docker_status,
+            docker::docker_up,
+            docker::docker_down,
             // Account — cloud token in the OS keychain
             account::account_status,
             account::account_set_token,

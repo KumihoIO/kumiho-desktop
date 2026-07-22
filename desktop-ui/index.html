@@ -6,218 +6,308 @@
 <title>Kumiho Desktop</title>
 <style>
   :root {
-    --bg: #0b0c10; --panel: #12141a; --line: #22252e; --ink: #e8e9ee;
-    --dim: #8a8f9c; --fox: #ff8a3d; --fox-dim: #7a4a24; --ok: #4ade80; --bad: #f87171;
+    --ink:#0c0c0e; --surface:#131316; --line:rgba(255,255,255,.10); --line-soft:rgba(255,255,255,.05);
+    --text:#f4f4f5; --dim:#a1a1aa; --faint:#71717a;
+    --fox:#ef4c28; --fox-hi:#f36c4c; --fox-lo:#fa9a85;
+    --ok:#34d399; --bad:#f87171; --warn:#fbbf24;
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
-    font: 14px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; }
-  #app { display: grid; grid-template-columns: 232px 1fr; height: 100vh; }
-  nav { background: #0e0f14; border-right: 1px solid var(--line); padding: 20px 12px; display: flex; flex-direction: column; gap: 4px; }
-  .brand { display: flex; align-items: center; gap: 9px; padding: 4px 10px 18px; font-weight: 650; letter-spacing: .2px; }
-  .brand .fox { font-size: 20px; }
-  .navbtn { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 9px; color: var(--dim);
-    cursor: pointer; user-select: none; border: 1px solid transparent; }
-  .navbtn:hover { background: #14161d; color: var(--ink); }
-  .navbtn.active { background: #171a22; color: var(--ink); border-color: var(--line); }
-  .navbtn .dot { width: 7px; height: 7px; border-radius: 50%; background: #3a3f4b; margin-left: auto; }
-  .navbtn .dot.on { background: var(--ok); } .navbtn .dot.off { background: var(--bad); }
-  main { overflow: auto; padding: 34px 40px; }
-  .panel { display: none; max-width: 760px; } .panel.active { display: block; }
-  h1 { font-size: 22px; margin: 0 0 4px; } .sub { color: var(--dim); margin: 0 0 26px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin-bottom: 16px; }
-  .row { display: flex; align-items: center; gap: 12px; }
-  .row + .row { margin-top: 12px; }
-  .grow { flex: 1; } .muted { color: var(--dim); font-size: 13px; }
-  .pill { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); }
-  .pill.on { color: var(--ok); border-color: #1f5133; } .pill.off { color: var(--bad); border-color: #5a2626; }
-  button { background: #1b1e26; color: var(--ink); border: 1px solid var(--line); border-radius: 9px;
-    padding: 8px 14px; font-size: 13px; cursor: pointer; }
-  button:hover { border-color: #3a3f4b; } button.primary { background: var(--fox); color: #1a0e05; border-color: var(--fox); font-weight: 600; }
-  button.primary:hover { filter: brightness(1.08); }
-  input { background: #0c0d12; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); padding: 8px 11px; font-size: 13px; width: 100%; }
-  .log { font: 12px ui-monospace, Menlo, Consolas, monospace; color: var(--dim); margin-top: 12px; white-space: pre-wrap;
-    min-height: 18px; padding: 8px 10px; background: #0c0d12; border-radius: 8px; border: 1px solid var(--line); }
-  .cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  .cmp h3 { margin: 0 0 3px; } .cmp ul { margin: 12px 0 0; padding-left: 18px; color: var(--dim); }
-  .cmp .now { border-color: var(--fox-dim); }
-  iframe { width: 100%; height: calc(100vh - 210px); border: 1px solid var(--line); border-radius: 12px; background: #000; }
-  .hostname { font-weight: 550; }
+  *{box-sizing:border-box;} html,body{margin:0;height:100%;background:var(--ink);color:var(--text);font:14px/1.55 var(--sans);}
+  ::selection{background:rgba(239,76,40,.35);color:#fff;}
+  h1,h2,h3{text-wrap:balance;letter-spacing:-.01em;} a{color:var(--fox-hi);text-decoration:none;}
+  .mono{font-family:var(--mono);} .kicker{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.22em;color:var(--faint);}
+  .dim{color:var(--dim);} .faint{color:var(--faint);}
+
+  /* buttons */
+  button{font-family:inherit;cursor:pointer;border-radius:6px;font-size:13px;font-weight:600;padding:0 16px;height:40px;
+    border:1px solid var(--line);background:rgba(255,255,255,.06);color:var(--text);transition:background .15s,border-color .15s,color .15s;}
+  button:hover{background:rgba(255,255,255,.12);} button:disabled{opacity:.5;cursor:not-allowed;}
+  button.primary{background:var(--fox);border-color:var(--fox);color:#fff;} button.primary:hover{background:var(--fox-hi);}
+  button.ghost{background:transparent;border-color:transparent;color:var(--dim);} button.ghost:hover{color:var(--text);background:rgba(255,255,255,.06);}
+  button.sm{height:34px;padding:0 12px;font-size:12px;}
+
+  input{width:100%;height:40px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:#0a0a0c;color:var(--text);font:13px var(--sans);}
+  input:focus{outline:none;border-color:rgba(239,76,40,.6);} input.mono{font-family:var(--mono);}
+  label.field{display:block;} label.field .lab{font-size:12px;color:var(--dim);margin-bottom:6px;display:block;}
+
+  .pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;
+    padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--dim);}
+  .pill.on{color:var(--ok);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08);}
+  .pill.off{color:var(--bad);border-color:rgba(248,113,113,.3);}
+  .pill.accent{color:var(--fox-lo);border-color:rgba(243,108,76,.4);background:rgba(239,76,40,.10);}
+  .dot{width:7px;height:7px;border-radius:50%;background:#3a3f4b;margin-left:auto;} .dot.on{background:var(--ok);} .dot.off{background:var(--bad);}
+
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:20px;}
+  .card + .card{margin-top:14px;}
+  .row{display:flex;align-items:center;gap:12px;} .row + .row{margin-top:12px;} .grow{flex:1;} .b{font-weight:600;}
+  .log{font-family:var(--mono);font-size:12px;color:var(--dim);white-space:pre-wrap;margin-top:12px;min-height:18px;
+    padding:8px 10px;background:#0a0a0c;border:1px solid var(--line);border-radius:8px;} .log.bad{color:var(--bad);}
+
+  /* setup modal */
+  .overlay{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(6px);}
+  .modal{width:min(680px,92vw);max-height:92vh;overflow:auto;background:var(--ink);border:1px solid var(--line);border-radius:24px;padding:32px;}
+  .modal h2{margin:.2em 0 .1em;font-size:22px;} .choose{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px;}
+  .choice{text-align:left;height:auto;padding:18px;border-radius:16px;border:1px solid var(--line);background:rgba(255,255,255,.03);display:block;}
+  .choice:hover{border-color:rgba(243,108,76,.5);background:rgba(255,255,255,.05);} .choice.sel{border-color:var(--fox);background:linear-gradient(to bottom,rgba(239,76,40,.10),rgba(255,255,255,.02));}
+  .choice .t{font-weight:650;font-size:15px;margin:8px 0 4px;} .choice ul{margin:8px 0 0;padding-left:16px;color:var(--dim);font-size:12.5px;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px;}
+  .steps{margin-top:14px;} .step{display:flex;gap:9px;align-items:center;font-size:13px;color:var(--dim);padding:3px 0;}
+  .step .n{width:18px;height:18px;border-radius:50%;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:11px;}
+  .step.done{color:var(--text);} .step.done .n{background:var(--ok);border-color:var(--ok);color:#04140c;} .step.active .n{border-color:var(--fox);color:var(--fox-hi);}
+
+  /* app shell */
+  #app{display:grid;grid-template-columns:240px 1fr;height:100vh;}
+  nav{background:#0a0a0c;border-right:1px solid var(--line-soft);padding:22px 14px;display:flex;flex-direction:column;gap:3px;}
+  .brand{padding:2px 10px 6px;} .brand .n{font-weight:650;font-size:15px;display:flex;gap:8px;align-items:center;}
+  .brand .sub{font-size:11px;color:var(--faint);margin-top:2px;}
+  .navlabel{font-size:10px;text-transform:uppercase;letter-spacing:.28em;color:rgba(255,255,255,.3);padding:16px 10px 6px;}
+  .navbtn{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;color:var(--dim);cursor:pointer;font-size:13.5px;}
+  .navbtn:hover{background:rgba(255,255,255,.05);color:var(--text);} .navbtn.active{background:rgba(255,255,255,.10);color:#fff;}
+  main{overflow:auto;padding:36px 42px;}
+  .panel{display:none;max-width:820px;} .panel.active{display:block;}
+  .ph1{font-size:22px;margin:0 0 3px;} .psub{color:var(--dim);margin:0 0 24px;}
+  iframe{width:100%;height:calc(100vh - 220px);border:1px solid var(--line);border-radius:16px;background:#000;}
+
+  /* upgrade */
+  .cmp{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+  .cmp .card.now{border-color:rgba(243,108,76,.5);background:linear-gradient(to bottom,rgba(239,76,40,.08),rgba(255,255,255,.02));}
+  .cmp ul{margin:12px 0 0;padding-left:16px;color:var(--dim);font-size:13px;} .cmp li{margin:5px 0;}
+  table{width:100%;border-collapse:collapse;margin-top:16px;font-size:13px;} th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--dim);font-weight:600;} td.num{font-family:var(--mono);}
+  tr.pop td{background:rgba(239,76,40,.06);} .tag{font-size:10px;color:var(--fox-lo);}
 </style>
 </head>
 <body>
-<div id="app">
+
+<!-- ===================== SETUP MODAL ===================== -->
+<div class="overlay" id="setup" style="display:none">
+  <div class="modal">
+    <div class="kicker">First run · Kumiho Desktop</div>
+    <h2>How do you want to run Kumiho?</h2>
+    <p class="dim" style="margin:.2em 0 0">The memory layer AI agents can trust. Choose where your memory lives — you can switch later.</p>
+
+    <div class="choose">
+      <div class="choice" id="ch-ce" onclick="pick('ce')">
+        <span class="pill accent">Free · Single-user · Self-hosted</span>
+        <div class="t">Community Edition</div>
+        <div class="dim" style="font-size:12.5px">Runs entirely on your machine.</div>
+        <ul><li>You run Neo4j + Redis locally (Docker)</li><li>No account, no cloud, no data caps</li><li>Single-user, loopback only</li></ul>
+      </div>
+      <div class="choice" id="ch-cloud" onclick="pick('cloud')">
+        <span class="pill accent">Recommended for teams</span>
+        <div class="t">Kumiho Cloud</div>
+        <div class="dim" style="font-size:12.5px">Managed — nothing to install.</div>
+        <ul><li>We host Neo4j, Redis, and the server</li><li>5,000 nodes free · team sharing</li><li>Multi-user + cross-device</li></ul>
+      </div>
+    </div>
+
+    <!-- CE config -->
+    <div id="ce-form" style="display:none">
+      <div class="grid2">
+        <label class="field"><span class="lab">Server port</span><input id="f-server" class="mono" value="9190"></label>
+        <label class="field"><span class="lab">Your name (memory author)</span><input id="f-user" placeholder="isake"></label>
+        <label class="field"><span class="lab">Neo4j port</span><input id="f-neo" class="mono" value="7687"></label>
+        <label class="field"><span class="lab">Neo4j password</span><input id="f-pass" type="password" placeholder="choose a local password"></label>
+        <label class="field"><span class="lab">Redis port (optional — event stream)</span><input id="f-redis" class="mono" value="6379"></label>
+        <label class="field" style="display:flex;align-items:flex-end;gap:8px"><input id="f-usered" type="checkbox" checked style="width:auto;height:auto"><span class="lab" style="margin:0">Run Redis</span></label>
+      </div>
+      <label class="row" style="margin-top:14px;font-size:13px;color:var(--dim)"><input id="f-eula" type="checkbox" style="width:auto;height:auto"><span>I accept the <a href="https://github.com/KumihoIO/kumiho-server-community/blob/main/EULA.md" target="_blank">Community Edition EULA</a> (free, single-user).</span></label>
+      <div class="steps" id="ce-steps" style="display:none">
+        <div class="step" data-s="install"><span class="n">1</span> Install the CE server</div>
+        <div class="step" data-s="db"><span class="n">2</span> Start Neo4j + Redis (Docker)</div>
+        <div class="step" data-s="config"><span class="n">3</span> Write config</div>
+        <div class="step" data-s="start"><span class="n">4</span> Start the server</div>
+      </div>
+      <div class="row" style="margin-top:16px"><button class="primary grow" onclick="setupCE()">Install &amp; start Community Edition</button></div>
+      <div class="log" id="ce-log"></div>
+    </div>
+
+    <!-- Cloud config -->
+    <div id="cloud-form" style="display:none">
+      <p class="dim" style="font-size:13px;margin-top:16px">Sign in on the web to create a token, then paste a <b>service token</b> (1-year) here — it is stored in your OS keychain, never in a file.</p>
+      <label class="field" style="margin-top:8px"><span class="lab">Kumiho Cloud service token</span><input id="c-token" type="password" placeholder="paste your service token"></label>
+      <div class="row" style="margin-top:14px">
+        <button onclick="openUrl('https://kumiho.io/signup')">Sign in / get token on web</button>
+        <button class="primary grow" onclick="setupCloud()">Connect to Kumiho Cloud</button>
+      </div>
+      <div class="log" id="cloud-log"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== APP SHELL ===================== -->
+<div id="app" style="display:none">
   <nav>
-    <div class="brand"><span class="fox">🦊🧠</span> Kumiho Desktop</div>
-    <div class="navbtn" data-tab="connect">Connect</div>
+    <div class="brand"><div class="n">🦊🧠 Kumiho Desktop</div><div class="sub" id="brand-sub">—</div></div>
+    <div class="navlabel">Workspace</div>
     <div class="navbtn" data-tab="run">Run <span class="dot" id="dot-ce"></span></div>
-    <div class="navbtn" data-tab="account">Account</div>
     <div class="navbtn" data-tab="see">See <span class="dot" id="dot-brain"></span></div>
+    <div class="navlabel">Setup</div>
+    <div class="navbtn" data-tab="connect">Connect</div>
+    <div class="navbtn" data-tab="account">Account</div>
     <div class="navbtn" data-tab="upgrade">Upgrade</div>
   </nav>
   <main>
-    <!-- CONNECT -->
-    <section class="panel" id="p-connect">
-      <h1>Connect</h1>
-      <p class="sub">Install Kumiho Memory into your agents. Detected hosts on this machine:</p>
-      <div id="hosts"></div>
-      <div class="log" id="log-connect"></div>
-    </section>
-
     <!-- RUN -->
     <section class="panel" id="p-run">
-      <h1>Run</h1>
-      <p class="sub">Your local Community Edition server and the Brain graph view.</p>
+      <h1 class="ph1">Run</h1><p class="psub">Your local Community Edition server and its databases.</p>
       <div class="card">
-        <div class="row"><div class="grow"><b>CE server</b> <span class="muted">gRPC · 127.0.0.1:9190</span></div>
-          <span class="pill" id="ce-pill">…</span></div>
-        <div class="row">
-          <button class="primary" onclick="ceRestart()">Restart</button>
-          <button onclick="run('ce_start','log-run')">Start</button>
-          <button onclick="run('ce_stop','log-run')">Stop</button>
-          <button onclick="refreshRun()">Refresh</button>
-        </div>
-        <p class="muted" style="margin:12px 0 0">If memory calls hang while the server still listens, it is likely
-          concurrency-starved — Restart clears it.</p>
+        <div class="row"><div class="grow"><span class="b">CE server</span> <span class="faint mono">127.0.0.1:9190</span> <span class="faint" id="ce-ver"></span></div><span class="pill" id="ce-pill">…</span></div>
+        <div class="row"><button class="primary" onclick="ceRestart()">Restart</button><button onclick="cmd('ce_start','run')">Start</button><button onclick="cmd('ce_stop','run')">Stop</button></div>
+        <p class="faint" style="font-size:12px;margin:12px 0 0">CE caps concurrent connections at <b>4</b> (compiled-in, single-user moat — not tunable). If memory calls stall while the port still listens, it is connection-starved; <b>Restart</b> clears it.</p>
       </div>
       <div class="card">
-        <div class="row"><div class="grow"><b>Brain</b> <span class="muted">graph view · 127.0.0.1:8090</span></div>
-          <span class="pill" id="brain-pill">…</span></div>
-        <div class="row">
-          <button onclick="run('brain_start','log-run')">Start</button>
-          <button onclick="run('brain_stop','log-run')">Stop</button>
-        </div>
+        <div class="row"><div class="grow"><span class="b">Databases</span> <span class="faint">Docker</span></div><span class="pill" id="docker-pill">…</span></div>
+        <div class="row" style="font-size:13px" id="db-lines"></div>
+        <div class="row"><button onclick="dbUp()">Start DBs</button><button onclick="cmd('docker_down','run')">Stop DBs</button></div>
       </div>
       <div class="log" id="log-run"></div>
     </section>
 
-    <!-- ACCOUNT -->
-    <section class="panel" id="p-account">
-      <h1>Account</h1>
-      <p class="sub">Your Kumiho Cloud token, stored in the OS keychain — never in a plaintext file.</p>
-      <div class="card">
-        <div class="row"><div class="grow">Cloud token</div><span class="pill" id="tok-pill">…</span></div>
-        <div class="row"><input id="tok" type="password" placeholder="Paste your Kumiho Cloud token" /></div>
-        <div class="row"><button class="primary" onclick="saveToken()">Save to keychain</button>
-          <button onclick="clearToken()">Clear</button></div>
-      </div>
-      <div class="log" id="log-account"></div>
-    </section>
-
     <!-- SEE -->
     <section class="panel" id="p-see">
-      <h1>See</h1>
-      <p class="sub">Your living memory graph. Start the Brain server, then it renders here.</p>
-      <div class="row" style="margin-bottom:12px">
-        <button class="primary" onclick="run('brain_start','log-see').then(()=>setTimeout(loadBrain,1500))">Start Brain</button>
-        <button onclick="loadBrain()">Reload</button>
-        <span class="muted" id="see-note"></span>
-      </div>
+      <h1 class="ph1">See</h1><p class="psub">Your living memory graph, streamed from the server.</p>
+      <div class="row" style="margin-bottom:12px"><button class="primary" onclick="cmd('brain_start','see').then(()=>setTimeout(loadBrain,1500))">Start Brain</button><button onclick="loadBrain()">Reload</button></div>
       <iframe id="brain-frame" title="Kumiho Brain"></iframe>
       <div class="log" id="log-see"></div>
     </section>
 
+    <!-- CONNECT -->
+    <section class="panel" id="p-connect">
+      <h1 class="ph1">Connect</h1><p class="psub">Install Kumiho Memory into your agents. Detected on this machine:</p>
+      <div id="hosts"></div><div class="log" id="log-connect"></div>
+    </section>
+
+    <!-- ACCOUNT -->
+    <section class="panel" id="p-account">
+      <h1 class="ph1">Account</h1><p class="psub">Your Kumiho Cloud service token, stored in the OS keychain.</p>
+      <div class="card">
+        <div class="row"><div class="grow">Cloud service token</div><span class="pill" id="tok-pill">…</span></div>
+        <div class="row"><input id="a-token" type="password" placeholder="paste your service token"></div>
+        <div class="row"><button class="primary" onclick="saveToken()">Save to keychain</button><button onclick="cmd('account_clear_token','account')">Clear</button>
+          <span class="grow"></span><span class="pill" id="cloud-pill">cloud …</span></div>
+      </div>
+      <div class="log" id="log-account"></div>
+    </section>
+
     <!-- UPGRADE -->
     <section class="panel" id="p-upgrade">
-      <h1>Upgrade</h1>
-      <p class="sub">Run free and private on your machine. Move to hosted when your team needs it.</p>
+      <h1 class="ph1">Upgrade</h1><p class="psub" id="up-tag">Run free and private. Move to hosted when your team needs it.</p>
       <div class="cmp" id="cmp"></div>
+      <div style="overflow-x:auto"><table id="tiers"></table></div>
+      <div class="row" style="margin-top:16px"><button class="primary" id="up-cta">Start in Cloud →</button><button onclick="openUrl('https://kumiho.io/pricing')">Compare plans</button></div>
     </section>
   </main>
 </div>
 
 <script>
-  const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+  const T = window.__TAURI__;
+  const invoke = (c,a) => T.core.invoke(c,a);
   const $ = (id) => document.getElementById(id);
-  const setLog = (id, msg, bad) => { const el = $(id); el.textContent = msg; el.style.color = bad ? 'var(--bad)' : 'var(--dim)'; };
+  const setLog = (id,msg,bad) => {const e=$('log-'+id)||$(id+'-log');if(!e)return;e.textContent=msg||'';e.className='log'+(bad?' bad':'');};
+  function openUrl(u){ try{ if(T.opener) T.opener.openUrl(u); else window.open(u,'_blank'); }catch(e){ window.open(u,'_blank'); } }
 
-  // --- tab routing ---
-  const tabs = document.querySelectorAll('.navbtn');
-  function show(tab) {
-    tabs.forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
-    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id === 'p-' + tab));
-    if (tab === 'connect') loadHosts();
-    if (tab === 'run' || tab === 'see') refreshRun();
-    if (tab === 'account') refreshAccount();
-    if (tab === 'upgrade') loadUpgrade();
-  }
-  tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.tab)));
+  // ---------- setup ----------
+  let picked = null;
+  function pick(m){ picked=m; $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
+    $('ce-form').style.display = m==='ce'?'block':'none'; $('cloud-form').style.display = m==='cloud'?'block':'none'; }
+  function markStep(s,cls){ const el=document.querySelector(`#ce-steps .step[data-s="${s}"]`); if(el) el.className='step '+cls; }
 
-  // --- generic command runner ---
-  async function run(cmd, logId, args) {
-    try { const r = await invoke(cmd, args); setLog(logId, (r && r.length) ? r : '✓ ' + cmd); }
-    catch (e) { setLog(logId, String(e), true); }
-    refreshRun();
-  }
-
-  // --- Run pillar ---
-  function pill(el, on) { el.textContent = on ? 'reachable' : 'unreachable'; el.className = 'pill ' + (on ? 'on' : 'off'); }
-  function dot(el, on) { el.className = 'dot ' + (on ? 'on' : 'off'); }
-  async function refreshRun() {
-    try {
-      const ce = await invoke('ce_status'); pill($('ce-pill'), ce.reachable); dot($('dot-ce'), ce.reachable);
-      const br = await invoke('brain_status'); pill($('brain-pill'), br.reachable); dot($('dot-brain'), br.reachable);
-    } catch (e) {}
-  }
-  async function ceRestart() {
-    setLog('log-run', 'restarting…');
-    try { await invoke('ce_stop'); } catch (e) {}
-    setTimeout(async () => { await run('ce_start', 'log-run'); }, 800);
+  async function setupCE(){
+    if(!$('f-eula').checked){ setLog('ce-log','Please accept the EULA to continue.',true); return; }
+    const pass=$('f-pass').value.trim(); if(!pass){ setLog('ce-log','Set a Neo4j password.',true); return; }
+    const serverPort=+$('f-server').value||9190, neo4jPort=+$('f-neo').value||7687, redisPort=+$('f-redis').value||6379;
+    const useRedis=$('f-usered').checked, localUser=$('f-user').value.trim()||'me';
+    $('ce-steps').style.display='block'; setLog('ce-log','');
+    try{
+      markStep('install','active');
+      const st=await invoke('ce_status');
+      if(!st.installed){ setLog('ce-log','Installing CE server…'); await invoke('ce_install'); }
+      markStep('install','done'); markStep('db','active'); setLog('ce-log','Starting Neo4j + Redis in Docker…');
+      await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis });
+      markStep('db','done'); markStep('config','active');
+      await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true });
+      markStep('config','done'); markStep('start','active'); setLog('ce-log','Waiting for Neo4j, then starting the server…');
+      await new Promise(r=>setTimeout(r,6000)); // let Neo4j come up
+      await invoke('ce_start');
+      markStep('start','done');
+      await invoke('desktop_config_set',{ cfg:{ configured:true, mode:'ce', server_port:serverPort, neo4j_port:neo4jPort, redis_port:redisPort, use_redis:useRedis, local_user:localUser } });
+      setLog('ce-log','✓ Community Edition is starting. Opening control center…');
+      setTimeout(enterApp,1200);
+    }catch(e){ setLog('ce-log',String(e),true); }
   }
 
-  // --- Account pillar ---
-  async function refreshAccount() {
-    try { const s = await invoke('account_status');
-      const el = $('tok-pill'); el.textContent = s.has_token ? 'in keychain' : 'not set';
-      el.className = 'pill ' + (s.has_token ? 'on' : 'off'); } catch (e) {}
-  }
-  async function saveToken() {
-    const token = $('tok').value;
-    try { await invoke('account_set_token', { token }); $('tok').value = ''; setLog('log-account', '✓ saved to keychain'); }
-    catch (e) { setLog('log-account', String(e), true); }
-    refreshAccount();
-  }
-  async function clearToken() {
-    try { await invoke('account_clear_token'); setLog('log-account', '✓ cleared'); }
-    catch (e) { setLog('log-account', String(e), true); }
-    refreshAccount();
+  async function setupCloud(){
+    const token=$('c-token').value.trim(); if(!token){ setLog('cloud-log','Paste a service token, or get one on the web.',true); return; }
+    try{
+      await invoke('account_set_token',{ token });
+      await invoke('desktop_config_set',{ cfg:{ configured:true, mode:'cloud', server_port:9190, neo4j_port:7687, redis_port:6379, use_redis:false, local_user:'' } });
+      setLog('cloud-log','✓ Connected. Opening control center…'); setTimeout(enterApp,900);
+    }catch(e){ setLog('cloud-log',String(e),true); }
   }
 
-  // --- Connect pillar ---
-  async function loadHosts() {
-    const wrap = $('hosts'); wrap.innerHTML = '';
-    let hosts = [];
-    try { hosts = await invoke('connect_hosts'); } catch (e) { setLog('log-connect', String(e), true); return; }
-    for (const h of hosts) {
-      const card = document.createElement('div'); card.className = 'card';
-      card.innerHTML = `<div class="row"><div class="grow"><span class="hostname">${h.name}</span></div>
-        <span class="pill ${h.installed ? 'on' : 'off'}">${h.installed ? 'detected' : 'not found'}</span></div>`;
-      const row = document.createElement('div'); row.className = 'row';
-      const btn = document.createElement('button'); btn.className = 'primary'; btn.textContent = 'Install Kumiho Memory';
-      btn.disabled = !h.installed;
-      btn.onclick = () => run('connect_install', 'log-connect', { host: h.id });
-      row.appendChild(btn); card.appendChild(row); wrap.appendChild(card);
-    }
+  // ---------- app ----------
+  let MODE='ce';
+  const tabs=document.querySelectorAll('.navbtn');
+  function show(t){ tabs.forEach(x=>x.classList.toggle('active',x.dataset.tab===t));
+    document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id==='p-'+t));
+    if(t==='run') refreshRun(); if(t==='connect') loadHosts(); if(t==='account') refreshAccount(); if(t==='upgrade') loadUpgrade(); }
+  tabs.forEach(x=>x.addEventListener('click',()=>show(x.dataset.tab)));
+
+  async function cmd(name,logId,args){ try{ const r=await invoke(name,args); setLog(logId,(r&&r.length)?r:'✓ '+name); }catch(e){ setLog(logId,String(e),true); } refreshRun(); }
+
+  function pill(el,on,txt){ el.textContent=txt||(on?'reachable':'unreachable'); el.className='pill '+(on?'on':'off'); }
+  async function refreshRun(){
+    try{ const ce=await invoke('ce_status'); pill($('ce-pill'),ce.reachable, ce.reachable?('v'+(ce.version||'?')):(ce.installed?'stopped':'not installed'));
+      $('dot-ce').className='dot '+(ce.reachable?'on':'off'); $('ce-ver').textContent=ce.mode?('· '+ce.mode):''; }catch(e){}
+    try{ const d=await invoke('docker_status'); $('docker-pill').textContent=d.available?'docker ok':'no docker'; $('docker-pill').className='pill '+(d.available?'on':'off');
+      $('db-lines').innerHTML=`<span class="pill ${d.neo4j?'on':'off'}">Neo4j</span> <span class="pill ${d.redis?'on':'off'}">Redis</span>`; }catch(e){}
+    try{ const b=await invoke('brain_status'); $('dot-brain').className='dot '+(b.reachable?'on':'off'); }catch(e){}
+  }
+  async function ceRestart(){ setLog('log-run','restarting…'); try{await invoke('ce_stop');}catch(e){} setTimeout(()=>cmd('ce_start','log-run'),900); }
+  async function dbUp(){ const c=await invoke('desktop_config_get'); const pass=prompt('Neo4j password (as set during setup):'); if(!pass)return;
+    setLog('log-run','starting databases…'); try{ await invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass,useRedis:c.use_redis}); setLog('log-run','✓ databases starting'); }catch(e){ setLog('log-run',String(e),true);} refreshRun(); }
+
+  async function refreshAccount(){
+    try{ const s=await invoke('account_status'); const e=$('tok-pill'); e.textContent=s.has_token?'in keychain':'not set'; e.className='pill '+(s.has_token?'on':'off'); }catch(e){}
+    try{ const r=await fetch('https://control.kumiho.cloud/health'); const ok=r.ok; $('cloud-pill').textContent=ok?'cloud reachable':'cloud down'; $('cloud-pill').className='pill '+(ok?'on':'off'); }
+    catch(e){ $('cloud-pill').textContent='cloud down'; $('cloud-pill').className='pill off'; }
+  }
+  async function saveToken(){ const token=$('a-token').value.trim(); if(!token){setLog('account','Paste a token first.',true);return;}
+    try{ await invoke('account_set_token',{token}); $('a-token').value=''; setLog('account','✓ saved to keychain'); }catch(e){ setLog('account',String(e),true);} refreshAccount(); }
+
+  async function loadHosts(){ const w=$('hosts'); w.innerHTML='';
+    let hosts=[]; try{ hosts=await invoke('connect_hosts'); }catch(e){ setLog('connect',String(e),true); return; }
+    for(const h of hosts){ const c=document.createElement('div'); c.className='card';
+      c.innerHTML=`<div class="row"><div class="grow b">${h.name}</div><span class="pill ${h.installed?'on':'off'}">${h.installed?'detected':'not found'}</span></div>`;
+      const row=document.createElement('div'); row.className='row'; const b=document.createElement('button'); b.className='primary sm';
+      b.textContent='Install Kumiho Memory'; b.disabled=!h.installed; b.onclick=()=>cmd('connect_install','log-connect',{host:h.id});
+      row.appendChild(b); c.appendChild(row); w.appendChild(c); }
   }
 
-  // --- See pillar ---
-  function loadBrain() {
-    const f = $('brain-frame'); f.src = 'http://127.0.0.1:8090/';
-    $('see-note').textContent = 'loading http://127.0.0.1:8090 …';
+  function loadBrain(){ $('brain-frame').src='http://127.0.0.1:8090/'; }
+
+  async function loadUpgrade(){ let i; try{ i=await invoke('upgrade_status'); }catch(e){ return; }
+    $('up-tag').textContent=i.tagline;
+    const ed=(e,now)=>`<div class="card ${now?'now':''}"><span class="pill accent">${e.badge}</span><h3 style="margin:10px 0 4px">${e.title}</h3>
+      <div class="dim" style="font-size:13px">${e.blurb}</div><ul>${e.bullets.map(b=>`<li>${b}</li>`).join('')}</ul></div>`;
+    $('cmp').innerHTML=ed(i.ce,i.current==='ce')+ed(i.cloud,i.current==='cloud');
+    $('tiers').innerHTML='<tr><th>Plan</th><th>Monthly</th><th>Yearly</th><th>Nodes</th></tr>'+i.tiers.map(t=>
+      `<tr class="${t.badge?'pop':''}"><td>${t.name} ${t.badge?`<span class="tag">${t.badge}</span>`:''}</td><td class="num">${t.monthly}</td><td class="num">${t.yearly}</td><td class="num">${t.nodes}</td></tr>`).join('');
+    $('up-cta').onclick=()=>openUrl(i.signup_url);
   }
 
-  // --- Upgrade pillar ---
-  async function loadUpgrade() {
-    let info; try { info = await invoke('upgrade_status'); } catch (e) { return; }
-    const ed = (e, now) => `<div class="card ${now ? 'now' : ''}"><h3>${e.name}</h3>
-      <div class="muted">${e.tagline}${now ? ' · current' : ''}</div>
-      <ul>${e.features.map(f => `<li>${f}</li>`).join('')}</ul></div>`;
-    $('cmp').innerHTML = ed(info.ce, info.current === 'ce') + ed(info.cloud, info.current === 'cloud')
-      + `<div style="grid-column:1/3"><button class="primary" onclick="window.open('${info.signup_url}')">Move to Kumiho Cloud →</button></div>`;
-  }
+  function enterApp(){ $('setup').style.display='none'; $('app').style.display='grid';
+    $('brand-sub').textContent = MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
+    show('run'); setInterval(()=>{ if($('p-run').classList.contains('active')) refreshRun(); },5000); }
 
   // boot
-  window.addEventListener('DOMContentLoaded', () => { show('run'); setInterval(refreshRun, 5000); });
+  window.addEventListener('DOMContentLoaded', async ()=>{
+    let cfg={configured:false}; try{ cfg=await invoke('desktop_config_get'); }catch(e){}
+    MODE=cfg.mode||'ce';
+    if(cfg.configured){ enterApp(); } else { $('setup').style.display='flex'; }
+  });
 </script>
 </body>
 </html>

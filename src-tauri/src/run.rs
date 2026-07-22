@@ -1,74 +1,185 @@
-//! Run pillar — lifecycle for the CE server (`kumiho_server`, gRPC @9190) and
-//! the Brain dashboard (`kumiho-brain`, HTTP @8090, the See pillar).
+//! Run pillar — install, configure, start/stop, and monitor the local CE server
+//! (`kumiho_server`, HTTP+gRPC on 127.0.0.1:9190), plus the Brain view (8090).
 //!
-//! The recurring failure mode is concurrency-starvation: the CE server keeps
-//! listening on 9190 but resets connections. `ce_status` surfaces reachability
-//! so the UI can offer a one-click restart (`ce_stop` + `ce_start`).
+//! Grounded in the real CE surface: config is a `~/.kumiho/server.toml` we write
+//! from the setup modal (keys per the onboard wizard) so we never need the
+//! interactive `onboard`; health is the server's own `/api/_live` + `/api/_health`.
+//! Note: CE hard-caps concurrent connections at 4 (compiled in — CE_MAX_CONNECTIONS,
+//! not tunable); when memory calls stall while the port still listens it is
+//! connection-starved, and a restart clears it.
 
+use crate::util::{ce_binary, command, kumiho_home};
 use crate::AppState;
 use serde::Serialize;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
-use std::process::Command;
+use std::process::Stdio;
 use std::time::Duration;
 use tauri::State;
 
 const CE_PORT: u16 = 9190;
 const BRAIN_PORT: u16 = 8090;
 
-/// TCP-connect probe on loopback (a wedged CE still accepts TCP, but this at
-/// least distinguishes "process gone" from "listening").
 fn port_open(port: u16) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
 }
 
-fn kumiho_home() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".kumiho"))
+/// Minimal loopback HTTP GET → parse a JSON body. No TLS (loopback only), no deps.
+fn http_get_json(port: u16, path: &str) -> Option<serde_json::Value> {
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    let mut s = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
+    s.set_read_timeout(Some(Duration::from_millis(2000))).ok()?;
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    );
+    s.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::new();
+    let _ = s.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf);
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    serde_json::from_str(text.get(start..=end)?).ok()
 }
 
 #[derive(Serialize)]
-pub struct PortStatus {
+pub struct CeStatus {
     pub reachable: bool,
     pub port: u16,
+    pub version: Option<String>,
+    pub mode: Option<String>,
+    pub installed: bool,
+    pub configured: bool,
+    /// The compiled-in CE concurrent-connection cap (fixed; shown for context).
+    pub max_connections: u32,
 }
 
 #[tauri::command]
-pub fn ce_status() -> PortStatus {
-    PortStatus { reachable: port_open(CE_PORT), port: CE_PORT }
+pub fn ce_status() -> CeStatus {
+    let live = http_get_json(CE_PORT, "/api/_live");
+    let configured = kumiho_home()
+        .map(|h| h.join("server.toml").exists())
+        .unwrap_or(false);
+    CeStatus {
+        reachable: live.is_some() || port_open(CE_PORT),
+        port: CE_PORT,
+        version: live
+            .as_ref()
+            .and_then(|v| v.get("version"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        mode: live
+            .as_ref()
+            .and_then(|v| v.get("deployment_mode"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        installed: ce_binary().is_some(),
+        configured,
+        max_connections: 4,
+    }
 }
 
-/// Relaunch the CE server via the on-disk launcher `~/.kumiho/start-kumiho-server.ps1`
-/// (the Defender-safe, log-redirecting path established during the wedge fixes).
+/// Dependency/readiness detail from the server's own `/api/_health`.
+#[tauri::command]
+pub fn ce_health() -> Option<serde_json::Value> {
+    http_get_json(CE_PORT, "/api/_health")
+}
+
+/// Run the Community Edition installer (one-liner from the community releases).
+/// Best-effort: the vendor installer hands off to interactive `onboard`, which we
+/// don't need — so we ignore its tail and confirm success by the binary landing.
+#[tauri::command]
+pub fn ce_install() -> Result<String, String> {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = command("powershell");
+        c.args([
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            "irm https://github.com/KumihoIO/kumiho-server-community/releases/latest/download/install.ps1 | iex",
+        ]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = command("sh");
+        c.args([
+            "-c",
+            "curl -fsSL https://github.com/KumihoIO/kumiho-server-community/releases/latest/download/install.sh | sh",
+        ]);
+        c
+    };
+    let _ = cmd.stdin(Stdio::null()).output();
+    if ce_binary().is_some() {
+        Ok("Community Edition installed".into())
+    } else {
+        Err("installer did not produce ~/.kumiho/bin/kumiho_server".into())
+    }
+}
+
+/// Write `~/.kumiho/server.toml` from the setup modal (bypasses interactive
+/// onboard). Keys match the onboard wizard's output.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn ce_configure(
+    server_port: u16,
+    neo4j_port: u16,
+    neo4j_password: String,
+    redis_port: Option<u16>,
+    local_user: String,
+    local_email: String,
+    eula_accepted: bool,
+) -> Result<String, String> {
+    if !eula_accepted {
+        return Err("the EULA must be accepted to run Community Edition".into());
+    }
+    if neo4j_password.trim().is_empty() {
+        return Err("a Neo4j password is required".into());
+    }
+    let home = kumiho_home().ok_or("no home directory")?;
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut toml = String::new();
+    toml.push_str("deployment_mode = \"self_hosted_ce\"\n");
+    toml.push_str("eula_accepted = true\n");
+    toml.push_str("eula_version = \"1.1\"\n");
+    toml.push_str(&format!("server_addr = \"127.0.0.1:{server_port}\"\n"));
+    toml.push_str(&format!("neo4j_port = {neo4j_port}\n"));
+    toml.push_str("db_name = \"neo4j\"\n");
+    toml.push_str("db_user = \"neo4j\"\n");
+    toml.push_str(&format!("db_pass = \"{}\"\n", esc(neo4j_password.trim())));
+    toml.push_str(&format!("local_user = \"{}\"\n", esc(local_user.trim())));
+    toml.push_str(&format!("local_email = \"{}\"\n", esc(local_email.trim())));
+    if let Some(rp) = redis_port {
+        toml.push_str(&format!("redis_port = {rp}\n"));
+    }
+    let path = home.join("server.toml");
+    std::fs::write(&path, toml).map_err(|e| e.to_string())?;
+    Ok(format!("wrote {}", path.display()))
+}
+
+/// Start the CE server with our written config (`KUMIHO_CONFIG`). Databases must
+/// be up first (see the docker pillar).
 #[tauri::command]
 pub fn ce_start() -> Result<String, String> {
-    let script = kumiho_home()
-        .map(|h| h.join("start-kumiho-server.ps1"))
-        .ok_or("no home directory")?;
-    if !script.exists() {
-        return Err(format!("launcher not found: {}", script.display()));
+    let bin = ce_binary().ok_or("kumiho_server is not installed yet")?;
+    let cfg = kumiho_home().ok_or("no home directory")?.join("server.toml");
+    if !cfg.exists() {
+        return Err("not configured yet — finish setup first".into());
     }
-    #[cfg(windows)]
-    {
-        Command::new("powershell")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-            .arg(&script)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        Ok("kumiho_server launch requested".into())
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = &script;
-        Err("CE start currently wires the Windows launcher only".into())
-    }
+    command(bin.to_str().ok_or("bad path")?)
+        .env("KUMIHO_CONFIG", &cfg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok("kumiho_server starting on 9190".into())
 }
 
 #[tauri::command]
 pub fn ce_stop() -> Result<String, String> {
     #[cfg(windows)]
     {
-        let out = Command::new("taskkill")
+        let out = command("taskkill")
             .args(["/IM", "kumiho_server.exe", "/F"])
             .output()
             .map_err(|e| e.to_string())?;
@@ -80,21 +191,26 @@ pub fn ce_stop() -> Result<String, String> {
     }
     #[cfg(not(windows))]
     {
-        Command::new("pkill")
-            .arg("-f")
-            .arg("kumiho_server")
-            .status()
+        command("pkill")
+            .args(["-f", "kumiho_server"])
+            .output()
             .map_err(|e| e.to_string())?;
-        Ok("stop requested".into())
+        Ok("kumiho_server stopped".into())
     }
 }
 
 // --- Brain (See pillar) ------------------------------------------------------
 
-fn brain_binary() -> Option<PathBuf> {
+fn brain_binary() -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) { "kumiho-brain.exe" } else { "kumiho-brain" };
     let p = kumiho_home()?.join("bin").join(name);
     p.exists().then_some(p)
+}
+
+#[derive(Serialize)]
+pub struct PortStatus {
+    pub reachable: bool,
+    pub port: u16,
 }
 
 #[tauri::command]
@@ -109,8 +225,10 @@ pub fn brain_start(state: State<AppState>) -> Result<String, String> {
     }
     let bin = brain_binary()
         .ok_or("kumiho-brain not found in ~/.kumiho/bin — install or build it first")?;
-    let child = Command::new(bin)
+    let child = command(bin.to_str().ok_or("bad path")?)
         .args(["--port", &BRAIN_PORT.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|e| e.to_string())?;
     *state.brain.lock().map_err(|e| e.to_string())? = Some(child);
