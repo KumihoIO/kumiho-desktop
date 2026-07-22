@@ -42,6 +42,10 @@
   .row{display:flex;align-items:center;gap:12px;} .row + .row{margin-top:12px;} .grow{flex:1;} .b{font-weight:600;}
   .log{font-family:var(--mono);font-size:12px;color:var(--dim);white-space:pre-wrap;margin-top:12px;min-height:18px;
     padding:8px 10px;background:#0a0a0c;border:1px solid var(--line);border-radius:8px;} .log.bad{color:var(--bad);}
+  .cmd{display:flex;align-items:center;gap:10px;border:1px solid var(--line);background:#0a0a0c;border-radius:8px;padding:6px 6px 6px 12px;margin-top:8px;}
+  .cmd .p{font-family:var(--mono);color:var(--fox-hi);font-size:13px;} .cmd code{font-family:var(--mono);font-size:12.5px;color:var(--text);white-space:nowrap;overflow-x:auto;flex:1;}
+  .cmd-copy{height:30px;padding:0 12px;font-size:12px;border-radius:6px;flex:none;}
+  .req{border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.05);margin-top:12px;}
 
   /* overlays / modals */
   .overlay{position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(6px);}
@@ -120,6 +124,13 @@
         <label class="field" style="display:flex;align-items:flex-end;gap:8px"><input id="f-usered" type="checkbox" checked style="width:auto;height:auto"><span class="lab" style="margin:0">Run Redis</span></label>
       </div>
       <label class="row" style="margin-top:14px;font-size:13px;color:var(--dim)"><input id="f-eula" type="checkbox" style="width:auto;height:auto"><span>I accept the <a href="https://github.com/KumihoIO/kumiho-server-community/blob/main/EULA.md" target="_blank">Community Edition EULA</a> (free, single-user).</span></label>
+      <div id="docker-help" style="display:none">
+        <div class="card req">
+          <div class="row"><span class="pill off">Docker not detected</span></div>
+          <p class="dim" style="font-size:13px;margin:8px 0 4px">CE needs Neo4j (via Docker). Install Docker below and retry — or run your own Neo4j 5.x on port 7687 and Kumiho reuses it.</p>
+          <div id="docker-cmds"></div>
+        </div>
+      </div>
       <div class="steps" id="ce-steps" style="display:none">
         <div class="step" data-s="install"><span class="n">1</span> Install the CE server</div>
         <div class="step" data-s="db"><span class="n">2</span> Start Neo4j + Redis (Docker)</div>
@@ -221,13 +232,33 @@
   function openUrl(u){ try{ if(T.opener) T.opener.openUrl(u); else window.open(u,'_blank'); }catch(e){ window.open(u,'_blank'); } }
   let toastT; function toast(msg,bad){ const el=$('toast'); el.textContent=msg; el.className='toast show'+(bad?' bad':''); clearTimeout(toastT); toastT=setTimeout(()=>el.className='toast'+(bad?' bad':''),2600); }
 
+  // platform-aware install-command chips (click Copy → paste in a terminal)
+  function osKind(){ const p=((navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||navigator.userAgent||'').toLowerCase();
+    if(p.includes('mac')) return 'mac'; if(p.includes('win')) return 'win'; return 'linux'; }
+  function chip(c){ return `<div class="cmd"><span class="p">$</span><code>${c.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</code><button class="cmd-copy" onclick="copyCmd(this)">Copy</button></div>`; }
+  function dockerCmds(){ const o=osKind();
+    const cmds = o==='mac' ? ['brew install --cask docker']
+      : o==='win' ? ['winget install -e --id Docker.DockerDesktop']
+      : ['curl -fsSL https://get.docker.com | sh', 'sudo usermod -aG docker $USER   # then log out and back in'];
+    return cmds.map(chip).join(''); }
+  async function copyCmd(btn){ const code=btn.parentElement.querySelector('code').textContent.replace(/\s+#.*$/,'').trim();
+    try{ await navigator.clipboard.writeText(code); const o=btn.textContent; btn.textContent='✓ Copied'; btn.classList.add('primary');
+      setTimeout(()=>{ btn.textContent=o; btn.classList.remove('primary'); },1600); }catch(e){ btn.textContent='select & copy'; } }
+
   // ---------- first-run setup ----------
   async function pick(m){ $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
     $('ce-form').style.display = m==='ce'?'block':'none'; $('cloud-form').style.display = m==='cloud'?'block':'none';
-    if(m==='ce'){ const btn=$('ce-btn'); try{ const st=await invoke('ce_status');
-      if(st.reachable){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
-      else if(btn){ btn.textContent = st.installed ? 'Start Community Edition' : 'Install & start Community Edition'; }
-    }catch(e){} } }
+    if(m==='ce'){ const btn=$('ce-btn');
+      try{ const st=await invoke('ce_status');
+        if(st.reachable){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
+        else if(btn){ btn.textContent = st.installed ? 'Start Community Edition' : 'Install & start Community Edition'; }
+      }catch(e){}
+      // Docker heads-up + copy-paste install chips — only when a DB isn't already up and Docker is missing
+      try{ const d=await invoke('docker_status'); const need = !d.available && !d.neo4j;
+        $('docker-help').style.display = need ? 'block' : 'none';
+        if(need) $('docker-cmds').innerHTML = dockerCmds();
+      }catch(e){}
+    } }
   function markStep(s,cls){ const el=document.querySelector(`#ce-steps .step[data-s="${s}"]`); if(el) el.className='step '+cls; }
   function waitFor(pred, ms){ const t0=Date.now(); return new Promise((resolve)=>{ (function tick(){
     Promise.resolve().then(pred).then(ok=>{ if(ok) return resolve(true); if(Date.now()-t0>ms) return resolve(false); setTimeout(tick,800); })
