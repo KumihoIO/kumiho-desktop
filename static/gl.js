@@ -78,7 +78,7 @@ void main(){
   float on = (uSearch > 0.5) ? (iState.x > 0.5 ? 1.0 : 0.06) : 1.0;
   if (uSpaceHi > -0.5) on *= (abs(iState.y - uSpaceHi) < 0.5) ? 1.0 : 0.10;
   float fog = clamp((7.2 - dist) / 3.0, 0.38, 1.0);
-  vGlow = (0.9 + 0.55*pulse + pop + sel*1.3) * fog * on;
+  vGlow = (0.72 + 0.5*pulse + pop + sel*1.3) * fog * on;
   vec3 conv = vec3(0.50, 0.82, 1.00);
   vec3 code = vec3(1.00, 0.60, 0.26);
   vCol = mix(conv, code, iMeta.y) * ambient(uTime);
@@ -88,8 +88,8 @@ void main(){
   vCore = 0.55 + 0.45*iMeta.w;
   // baseSize encodes degree (hubs bulk up); 0 through ~deg 1, 1 at the cap
   vHub = clamp((iMeta.z - 3.6) / 4.6, 0.0, 1.0);
-  float px = iMeta.z * (0.95 + 0.40*pulse + pop*2.0 + sel*1.6) * uPixelScale * 3.9 / dist;
-  px = clamp(px, 1.5, 220.0);
+  float px = iMeta.z * (0.95 + 0.40*pulse + pop*2.0 + sel*1.6) * uPixelScale * 2.8 / dist;
+  px = clamp(px, 1.5, 88.0);
   vec4 clip = uProj * view;
   clip.xy += aCorner * (px * 2.0 / uViewport) * clip.w;
   gl_Position = clip;
@@ -109,7 +109,7 @@ void main(){
   // with the quad and reads as a flat white disc; pull the interior down so
   // hubs stay graded orbs — size, not saturation, carries the degree signal
   float core = pow(max(0.0, 1.0 - d), 6.0) * (1.1 + vCore) * (1.0 - 0.62 * vHub);
-  float halo = pow(max(0.0, 1.0 - d), 2.2) * 0.30 * (1.0 - 0.40 * vHub);
+  float halo = pow(max(0.0, 1.0 - d), 2.2) * 0.17 * (1.0 - 0.40 * vHub);
   float r = sqrt(d);
   float ring = 0.0;
   if (vBirth < 1.6) {
