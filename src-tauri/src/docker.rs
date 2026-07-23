@@ -1,15 +1,19 @@
-//! Docker pillar — run the CE server's dependencies (Neo4j + Redis) as local
-//! containers, OR reuse whatever is already serving those ports (e.g. an
-//! existing Neo4j from a prior setup). Container names mirror the community
-//! `deploy/docker-compose.yml`: kumiho-ce-neo4j / kumiho-ce-redis.
+//! Docker pillar — manage the CE server's dependencies (Neo4j + Redis).
+//!
+//! We do NOT assume our own container names: an existing Neo4j/Redis container
+//! (however it was created — `kumiho-neo4j`, plain `neo4j`, the community
+//! compose's `kumiho-ce-neo4j`, …) is discovered and managed. A container is
+//! only created when nothing suitable exists and the port is free.
 
 use crate::util::command;
 use serde::Serialize;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
-const NEO4J_CONTAINER: &str = "kumiho-ce-neo4j";
-const REDIS_CONTAINER: &str = "kumiho-ce-redis";
+/// Candidate container names, most-specific first. The first entry is the one
+/// we create ourselves when nothing exists.
+const NEO4J_NAMES: &[&str] = &["kumiho-ce-neo4j", "kumiho-neo4j", "neo4j"];
+const REDIS_NAMES: &[&str] = &["kumiho-ce-redis", "kumiho-redis", "redis"];
 const NEO4J_DEFAULT: u16 = 7687;
 const REDIS_DEFAULT: u16 = 6379;
 
@@ -19,7 +23,6 @@ fn port_serving(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
 }
 
-/// Is a working `docker` CLI on PATH (and its daemon reachable enough to answer)?
 fn docker_available() -> bool {
     command("docker")
         .arg("--version")
@@ -31,16 +34,22 @@ fn docker_available() -> bool {
 /// Actionable, platform-aware guidance when Docker is needed but missing.
 fn docker_missing_message() -> String {
     let how = if cfg!(target_os = "linux") {
-        "install it — e.g. `sudo apt install docker.io`, then `sudo systemctl enable --now docker` and `sudo usermod -aG docker $USER` (re-login)"
-    } else if cfg!(target_os = "macos") {
-        "install Docker Desktop from https://www.docker.com/products/docker-desktop and start it"
+        "install it — e.g. `curl -fsSL https://get.docker.com | sh`, then `sudo usermod -aG docker $USER` (re-login)"
     } else {
-        "install Docker Desktop from https://www.docker.com/products/docker-desktop and start it (make sure the whale icon says it's running)"
+        "install Docker Desktop from https://www.docker.com/products/docker-desktop and start it"
     };
     format!(
         "Docker isn't installed or running — {how}. \
          Or run Neo4j 5.x (and optionally Redis) yourself; Kumiho reuses whatever is already listening on those ports."
     )
+}
+
+fn container_exists(name: &str) -> bool {
+    command("docker")
+        .args(["inspect", "-f", "{{.State.Status}}", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn container_running(name: &str) -> bool {
@@ -51,12 +60,13 @@ fn container_running(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn container_exists(name: &str) -> bool {
-    command("docker")
-        .args(["inspect", "-f", "{{.State.Status}}", name])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// The first existing container among the candidates — so we manage the one you
+/// already have instead of creating a duplicate under a different name.
+fn find_container(cands: &[&str]) -> Option<String> {
+    cands
+        .iter()
+        .find(|n| container_exists(n))
+        .map(|n| (*n).to_string())
 }
 
 #[derive(Serialize)]
@@ -69,17 +79,19 @@ pub struct DockerStatus {
 #[tauri::command]
 pub fn docker_status() -> DockerStatus {
     let available = docker_available();
-    // Reachable counts whether it's our container or a pre-existing server.
+    let running = |cands: &[&str], port: u16| {
+        port_serving(port)
+            || (available && find_container(cands).map(|n| container_running(&n)).unwrap_or(false))
+    };
     DockerStatus {
         available,
-        neo4j: port_serving(NEO4J_DEFAULT) || (available && container_running(NEO4J_CONTAINER)),
-        redis: port_serving(REDIS_DEFAULT) || (available && container_running(REDIS_CONTAINER)),
+        neo4j: running(NEO4J_NAMES, NEO4J_DEFAULT),
+        redis: running(REDIS_NAMES, REDIS_DEFAULT),
     }
 }
 
-/// Bring up Neo4j (and optional Redis). If a port is already served, reuse it
-/// instead of creating a conflicting container. If a DB is actually needed and
-/// Docker isn't available, return actionable guidance rather than a raw error.
+/// Bring up Neo4j (and optional Redis): reuse a served port, else start an
+/// existing container, else create one. A password is only needed to CREATE.
 #[tauri::command]
 pub fn docker_up(
     neo4j_port: u16,
@@ -90,7 +102,6 @@ pub fn docker_up(
     let need_neo4j = !port_serving(neo4j_port);
     let need_redis = use_redis && !port_serving(redis_port);
 
-    // Only require Docker if we actually have to create a container.
     if (need_neo4j || need_redis) && !docker_available() {
         return Err(docker_missing_message());
     }
@@ -98,38 +109,30 @@ pub fn docker_up(
     let mut notes: Vec<String> = Vec::new();
 
     if need_neo4j {
-        if neo4j_password.trim().is_empty() {
-            return Err("a Neo4j password is required to create the database".into());
-        }
-        run_or_start(
-            NEO4J_CONTAINER,
-            &[
-                "run", "-d",
-                "--name", NEO4J_CONTAINER,
-                "--restart", "unless-stopped",
-                "-p", &format!("127.0.0.1:{neo4j_port}:7687"),
-                "-e", &format!("NEO4J_AUTH=neo4j/{}", neo4j_password.replace(['"', ' '], "")),
-                "neo4j:5",
-            ],
-        )?;
-        notes.push(format!("Neo4j starting on {neo4j_port}"));
+        let pw = neo4j_password.replace(['"', ' '], "");
+        let create = vec![
+            "run".into(), "-d".into(),
+            "--name".into(), NEO4J_NAMES[0].to_string(),
+            "--restart".into(), "unless-stopped".into(),
+            "-p".into(), format!("127.0.0.1:{neo4j_port}:7687"),
+            "-e".into(), format!("NEO4J_AUTH=neo4j/{pw}"),
+            "neo4j:5".into(),
+        ];
+        notes.push(start_or_create(NEO4J_NAMES, &create, !neo4j_password.trim().is_empty(), "Neo4j")?);
     } else {
         notes.push(format!("Neo4j already serving {neo4j_port} — reusing"));
     }
 
     if use_redis {
         if need_redis {
-            run_or_start(
-                REDIS_CONTAINER,
-                &[
-                    "run", "-d",
-                    "--name", REDIS_CONTAINER,
-                    "--restart", "unless-stopped",
-                    "-p", &format!("127.0.0.1:{redis_port}:6379"),
-                    "redis:7",
-                ],
-            )?;
-            notes.push(format!("Redis starting on {redis_port}"));
+            let create = vec![
+                "run".into(), "-d".into(),
+                "--name".into(), REDIS_NAMES[0].to_string(),
+                "--restart".into(), "unless-stopped".into(),
+                "-p".into(), format!("127.0.0.1:{redis_port}:6379"),
+                "redis:7".into(),
+            ];
+            notes.push(start_or_create(REDIS_NAMES, &create, true, "Redis")?);
         } else {
             notes.push(format!("Redis already serving {redis_port} — reusing"));
         }
@@ -138,26 +141,41 @@ pub fn docker_up(
     Ok(notes.join("; "))
 }
 
-/// `docker start` an existing container; if that fails (e.g. a stale port map),
-/// remove it and create it fresh. Otherwise `docker run` a new one.
-fn run_or_start(name: &str, run_args: &[&str]) -> Result<(), String> {
-    if container_exists(name) {
+/// Start an existing container (any known name), else create ours. `can_create`
+/// is false when we'd need a password we don't have.
+fn start_or_create(
+    cands: &[&str],
+    create_args: &[String],
+    can_create: bool,
+    label: &str,
+) -> Result<String, String> {
+    if let Some(name) = find_container(cands) {
         let out = command("docker")
-            .args(["start", name])
+            .args(["start", &name])
             .output()
             .map_err(|e| format!("docker not available: {e}"))?;
         if out.status.success() {
-            return Ok(());
+            return Ok(format!("{label} container '{name}' started"));
         }
-        // Broken/misconfigured container (e.g. stale port binding) — recreate it.
-        let _ = command("docker").args(["rm", "-f", name]).output();
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // Only recreate a container we own; never silently destroy the user's.
+        if name != cands[0] {
+            return Err(format!("could not start '{name}': {err}"));
+        }
+        let _ = command("docker").args(["rm", "-f", &name]).output();
     }
+    if !can_create {
+        return Err(format!(
+            "a Neo4j password is required to create the {label} database (no existing container found)"
+        ));
+    }
+    let args: Vec<&str> = create_args.iter().map(|s| s.as_str()).collect();
     let out = command("docker")
-        .args(run_args)
+        .args(&args)
         .output()
         .map_err(|e| format!("docker not available: {e}"))?;
     if out.status.success() {
-        Ok(())
+        Ok(format!("{label} container '{}' created", cands[0]))
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
@@ -165,9 +183,18 @@ fn run_or_start(name: &str, run_args: &[&str]) -> Result<(), String> {
 
 #[tauri::command]
 pub fn docker_down() -> Result<String, String> {
-    // Stop only our own containers (leave a reused, user-managed DB alone).
-    let _ = command("docker")
-        .args(["stop", NEO4J_CONTAINER, REDIS_CONTAINER])
-        .output();
-    Ok("databases stopped".into())
+    let mut stopped: Vec<String> = Vec::new();
+    for cands in [NEO4J_NAMES, REDIS_NAMES] {
+        if let Some(name) = find_container(cands) {
+            let out = command("docker").args(["stop", &name]).output();
+            if out.map(|o| o.status.success()).unwrap_or(false) {
+                stopped.push(name);
+            }
+        }
+    }
+    if stopped.is_empty() {
+        Ok("no Kumiho database containers found to stop".into())
+    } else {
+        Ok(format!("stopped {}", stopped.join(", ")))
+    }
 }

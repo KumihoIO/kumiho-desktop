@@ -158,10 +158,11 @@
       <span><span class="dot" id="dot-brain"></span> Brain</span>
     </div>
     <div class="grow"></div>
+    <button class="sm" onclick="startBrain()">Restart Brain</button>
+    <button class="sm" onclick="loadBrain()">Reload</button>
     <button class="icon" title="Settings" onclick="openSettings()">⚙</button>
   </header>
   <div class="stage">
-    <div class="float"><button class="sm" onclick="startBrain()">Restart Brain</button><button class="sm" onclick="loadBrain()">Reload</button></div>
     <div class="empty" id="brain-empty">
       <h3>Your living memory graph</h3>
       <p class="dim" style="margin:0">Start the Brain server to render it here.</p>
@@ -327,8 +328,15 @@
       $('db-lines').innerHTML=`<span class="pill ${d.neo4j?'on':'off'}">Neo4j</span> <span class="pill ${d.redis?'on':'off'}">Redis</span>`; }catch(e){}
   }
   async function ceRestart(){ setLog('log-run','restarting…'); try{await invoke('ce_stop');}catch(e){} setTimeout(()=>cmd('ce_start','log-run'),900); }
-  async function dbUp(){ const c=await invoke('desktop_config_get'); const pass=prompt('Neo4j password (as set during setup):'); if(!pass)return;
-    setLog('log-run','starting databases…'); try{ await invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass,useRedis:c.use_redis}); setLog('log-run','✓ databases starting'); }catch(e){ setLog('log-run',String(e),true);} refreshRun(); }
+  async function dbUp(){ const c=await invoke('desktop_config_get'); setLog('log-run','starting databases…');
+    const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis});
+    try{ const r=await go(''); setLog('log-run', r||'✓ databases up'); }
+    catch(e){ const msg=String(e);
+      if(/password/i.test(msg)){ const pass=prompt('Neo4j password (needed to create the database):');
+        if(!pass){ setLog('log-run','cancelled'); refreshRun(); return; }
+        try{ const r=await go(pass); setLog('log-run', r||'✓ databases up'); }catch(e2){ setLog('log-run',String(e2),true); } }
+      else { setLog('log-run',msg,true); } }
+    refreshRun(); }
 
   async function refreshAccount(){
     try{ const s=await invoke('account_status'); const e=$('tok-pill'); e.textContent=s.has_token?'in keychain':'not set'; e.className='pill '+(s.has_token?'on':'off'); }catch(e){}
