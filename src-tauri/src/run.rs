@@ -203,6 +203,15 @@ pub fn ce_stop() -> Result<String, String> {
 
 fn brain_binary() -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) { "kumiho-brain.exe" } else { "kumiho-brain" };
+    // 1) bundled sidecar sitting next to the app executable (installed builds).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(p) = exe.parent().map(|d| d.join(name)) {
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    // 2) a manually-installed copy (dev / `cargo tauri dev`).
     let p = kumiho_home()?.join("bin").join(name);
     p.exists().then_some(p)
 }
