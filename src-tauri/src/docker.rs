@@ -5,7 +5,7 @@
 //! compose's `kumiho-ce-neo4j`, …) is discovered and managed. A container is
 //! only created when nothing suitable exists and the port is free.
 
-use crate::util::command;
+use crate::util::{command, kumiho_home};
 use serde::Serialize;
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -90,8 +90,24 @@ pub fn docker_status() -> DockerStatus {
     }
 }
 
+/// The Neo4j password saved at setup (`~/.kumiho/server.toml` `db_pass`), so
+/// starting the databases never has to re-prompt for it.
+fn stored_neo4j_password() -> Option<String> {
+    let text = std::fs::read_to_string(kumiho_home()?.join("server.toml")).ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("db_pass") {
+            let v = rest.trim_start().strip_prefix('=')?.trim().trim_matches('"');
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Bring up Neo4j (and optional Redis): reuse a served port, else start an
-/// existing container, else create one. A password is only needed to CREATE.
+/// existing container, else create one. A password is only needed to CREATE —
+/// and we fall back to the one saved at setup so the user isn't re-prompted.
 #[tauri::command]
 pub fn docker_up(
     neo4j_port: u16,
@@ -99,6 +115,11 @@ pub fn docker_up(
     neo4j_password: String,
     use_redis: bool,
 ) -> Result<String, String> {
+    let neo4j_password = if neo4j_password.trim().is_empty() {
+        stored_neo4j_password().unwrap_or_default()
+    } else {
+        neo4j_password
+    };
     let need_neo4j = !port_serving(neo4j_port);
     let need_redis = use_redis && !port_serving(redis_port);
 
