@@ -3,7 +3,7 @@
 The control center for **Kumiho Memory** — set up the server, connect your
 agents, and watch your memory graph grow, live.
 
-![Kumiho Brain — the living memory graph rendered as a glowing nebula of memory points, streamed from your own server](docs/kumiho-brain.png)
+![Kumiho Desktop — the control center: your living memory graph GPU-rendered at its heart, with live memory vitals, spaces, and recently-registered writes around it](docs/kumiho-desktop.png)
 
 Kumiho Desktop is a small native app (Tauri + Rust) that gives the whole Kumiho
 stack one front door:
