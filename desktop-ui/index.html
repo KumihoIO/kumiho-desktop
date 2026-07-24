@@ -209,7 +209,7 @@
       <div class="card">
         <div class="row"><div class="grow">Cloud service token</div><span class="pill" id="tok-pill">…</span></div>
         <div class="row"><input id="a-token" type="password" placeholder="paste your service token"></div>
-        <div class="row"><button class="primary" onclick="saveToken()">Save &amp; connect</button><button onclick="cmd('account_clear_token','account')">Clear</button>
+        <div class="row"><button class="primary" onclick="saveToken()">Save &amp; connect</button><button onclick="clearToken()">Clear &amp; use CE</button>
           <span class="grow"></span><span class="pill" id="cloud-pill">cloud …</span></div>
       </div>
       <div class="log" id="log-account"></div>
@@ -401,6 +401,37 @@
     }catch(e){}
     setLog('account','✓ saved — connecting to Kumiho Cloud…'); toast('✓ token saved');
     await startBrain();
+    refreshAccount(); }
+
+  // Re-open the first-run wizard (over the app) with CE preselected, for when
+  // there is no local CE to switch to yet.
+  function openCESetup(){ closeSettings(); $('setup').classList.add('show'); pick('ce'); }
+
+  // The inverse of Save & connect: drop the token and return to local CE. A
+  // cloud-mode Brain with no token connects to nothing, so we also flip the mode
+  // back and respawn the Brain against the local server.
+  async function clearToken(){
+    let ce; try{ ce=await invoke('ce_status'); }catch(e){ ce={installed:false,configured:false,reachable:false}; }
+    // Switching to CE only works if a local CE exists. A cloud-first install has
+    // none, and there is no in-session installer — so route to setup instead of
+    // stranding the user in a dead CE. Keep the token until CE is actually ready.
+    if(!(ce.installed && ce.configured)){
+      setLog('account',"Community Edition isn't set up on this machine — opening setup. Your cloud token stays until CE is ready.");
+      toast('set up Community Edition'); setTimeout(openCESetup,800); return;
+    }
+    try{ await invoke('account_clear_token'); }
+    catch(e){ setLog('account',String(e),true); return; }
+    try{ const cur=await invoke('desktop_config_get');
+      await invoke('desktop_config_set',{ cfg:{ ...cur, configured:true, mode:'ce' } });
+      MODE='ce'; $('brand-sub').textContent='Community Edition · local';
+    }catch(e){ setLog('account','token cleared, but saving the mode failed: '+String(e),true); return; }
+    toast('✓ using Community Edition');
+    await startBrain();
+    try{ const s=await invoke('ce_status');
+      setLog('account', s.reachable
+        ? '✓ token cleared — switched to Community Edition'
+        : "Token cleared — switched to CE, but the local server isn't running. Open ⚙ → Run → Start.", !s.reachable);
+    }catch(e){ setLog('account','✓ token cleared — switched to Community Edition'); }
     refreshAccount(); }
 
   // Authoritative per-host install commands (KumihoIO/kumiho-plugins README).
