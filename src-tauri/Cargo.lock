@@ -2066,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "kumiho-desktop"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "dirs 5.0.1",
  "keyring",
