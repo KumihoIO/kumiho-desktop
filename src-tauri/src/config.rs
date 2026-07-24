@@ -35,6 +35,12 @@ fn config_path() -> Option<std::path::PathBuf> {
     kumiho_home().map(|h| h.join("desktop.json"))
 }
 
+/// This app's version — shown in the window title / header.
+#[tauri::command]
+pub fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 #[tauri::command]
 pub fn desktop_config_get() -> DesktopConfig {
     config_path()

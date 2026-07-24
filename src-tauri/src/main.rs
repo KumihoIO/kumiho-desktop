@@ -27,6 +27,7 @@ fn main() {
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // First-run + app config
+            config::app_version,
             config::desktop_config_get,
             config::desktop_config_set,
             // Run — CE server lifecycle + Brain

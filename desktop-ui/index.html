@@ -152,7 +152,7 @@
 <!-- ===================== APP: BRAIN IS THE MAIN VIEW ===================== -->
 <div id="app">
   <header>
-    <div class="brand">🦊🧠 <span>Kumiho</span> <span class="sub" id="brand-sub">—</span></div>
+    <div class="brand">🦊🧠 <span>Kumiho</span> <span class="sub" id="app-ver"></span> <span class="sub" id="brand-sub">—</span></div>
     <div class="stat">
       <span><span class="dot" id="dot-ce"></span> Server</span>
       <span><span class="dot" id="dot-brain"></span> Brain</span>
@@ -188,6 +188,7 @@
       <div class="card">
         <div class="row"><div class="grow"><span class="b">CE server</span> <span class="faint mono">127.0.0.1:9190</span> <span class="faint" id="ce-ver"></span></div><span class="pill" id="ce-pill">…</span></div>
         <div class="row"><button class="primary" onclick="ceRestart()">Restart</button><button onclick="cmd('ce_start','run')">Start</button><button onclick="cmd('ce_stop','run')">Stop</button></div>
+        <div class="row" id="ce-update" style="font-size:12.5px"></div>
         <p class="faint" style="font-size:12px;margin:12px 0 0">CE caps concurrent connections at <b>4</b> (compiled-in, single-user moat — not tunable). If memory calls stall while the port still listens, it is connection-starved; <b>Restart</b> clears it.</p>
       </div>
       <div class="card">
@@ -321,9 +322,26 @@
     try{ const b=await invoke('brain_status'); $('dot-brain').className='dot '+(b.reachable?'on':'off');
       $('brain-empty').classList.toggle('hide', b.reachable); }catch(e){}
   }
+  const CE_LATEST_URL='https://api.github.com/repos/KumihoIO/kumiho-server-community/releases/latest';
+  async function ceLatestVersion(){ try{ const r=await fetch(CE_LATEST_URL); if(!r.ok) return null;
+    const j=await r.json(); return String(j.tag_name||'').replace(/^v/,'')||null; }catch(e){ return null; } }
+  async function ceUpdate(){ setLog('log-run','updating the CE server…');
+    try{ await invoke('ce_stop'); }catch(e){}
+    try{ await invoke('ce_install'); await invoke('ce_start');
+      const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable), 40000);
+      setLog('log-run', up?'✓ CE updated and running':'installed — but the server did not answer; try Start'); }
+    catch(e){ setLog('log-run',String(e),true); }
+    refreshRun(); }
+
   async function refreshRun(){
     try{ const ce=await invoke('ce_status'); pill($('ce-pill'),ce.reachable, ce.reachable?('v'+(ce.version||'?')):(ce.installed?'stopped':'not installed'));
-      $('dot-ce').className='dot '+(ce.reachable?'on':'off'); $('ce-ver').textContent=ce.mode?('· '+ce.mode):''; }catch(e){}
+      $('dot-ce').className='dot '+(ce.reachable?'on':'off'); $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
+      const box=$('ce-update');
+      if(box){ const latest=await ceLatestVersion();
+        if(!latest) box.innerHTML='';
+        else if(ce.version && ce.version!==latest) box.innerHTML=`<span class="pill accent">update available · v${latest}</span> <button class="sm primary" onclick="ceUpdate()">Update CE</button>`;
+        else box.innerHTML=`<span class="faint">CE is up to date (v${latest})</span>`; }
+    }catch(e){}
     try{ const d=await invoke('docker_status'); $('docker-pill').textContent=d.available?'docker ok':'no docker'; $('docker-pill').className='pill '+(d.available?'on':'off');
       $('db-lines').innerHTML=`<span class="pill ${d.neo4j?'on':'off'}">Neo4j</span> <span class="pill ${d.redis?'on':'off'}">Redis</span>`; }catch(e){}
   }
@@ -346,13 +364,22 @@
   async function saveToken(){ const token=$('a-token').value.trim(); if(!token){setLog('account','Paste a token first.',true);return;}
     try{ await invoke('account_set_token',{token}); $('a-token').value=''; setLog('account','✓ saved to keychain'); toast('✓ token saved'); }catch(e){ setLog('account',String(e),true);} refreshAccount(); }
 
+  // Authoritative per-host install commands (KumihoIO/kumiho-plugins README).
+  const PLUGIN_DOCS='https://github.com/KumihoIO/kumiho-plugins';
+  const HOST_CMDS={
+    claude:['claude plugin marketplace add KumihoIO/kumiho-plugins','claude plugin install kumiho-memory@kumiho-plugins'],
+    codex:['codex plugin marketplace add KumihoIO/kumiho-plugins','codex plugin add kumiho-memory@kumiho-plugins'],
+    openclaw:[]
+  };
   async function loadHosts(){ const w=$('hosts'); w.innerHTML='';
     let hosts=[]; try{ hosts=await invoke('connect_hosts'); }catch(e){ setLog('connect',String(e),true); return; }
-    for(const h of hosts){ const c=document.createElement('div'); c.className='card';
-      c.innerHTML=`<div class="row"><div class="grow b">${h.name}</div><span class="pill ${h.installed?'on':'off'}">${h.installed?'detected':'not found'}</span></div>`;
-      const row=document.createElement('div'); row.className='row'; const b=document.createElement('button'); b.className='primary sm';
-      b.textContent='Install Kumiho Memory'; b.disabled=!h.installed; b.onclick=()=>cmd('connect_install','log-connect',{host:h.id});
-      row.appendChild(b); c.appendChild(row); w.appendChild(c); }
+    for(const h of hosts){ const cmds=HOST_CMDS[h.id]||[]; const c=document.createElement('div'); c.className='card';
+      c.innerHTML=`<div class="row"><div class="grow b">${h.name}</div><span class="pill ${h.installed?'on':'off'}">${h.installed?'detected':'not found'}</span></div>`
+        + (cmds.length
+            ? `<p class="dim" style="font-size:12.5px;margin:10px 0 0">Run these in your terminal:</p>` + cmds.map(chip).join('')
+            : `<p class="dim" style="font-size:12.5px;margin:10px 0 0">See the install guide for this host.</p>`)
+        + `<div class="row" style="margin-top:10px"><button class="sm" onclick="openUrl('${PLUGIN_DOCS}')">Open install guide →</button></div>`;
+      w.appendChild(c); }
   }
 
   async function loadUpgrade(){ let i; try{ i=await invoke('upgrade_status'); }catch(e){ return; }
@@ -385,6 +412,8 @@
 
   // boot
   window.addEventListener('DOMContentLoaded', async ()=>{
+    try{ const v=await invoke('app_version'); document.title='Kumiho Desktop v'+v;
+      const el=$('app-ver'); if(el) el.textContent='v'+v; }catch(e){}
     let cfg={configured:false}; try{ cfg=await invoke('desktop_config_get'); }catch(e){}
     MODE=cfg.mode||'ce';
     if(cfg.configured){ enterApp(); } else { $('setup').classList.add('show'); }
