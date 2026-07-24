@@ -46,6 +46,7 @@ fn main() {
             docker::docker_down,
             // Account — cloud token in the OS keychain
             account::account_status,
+            account::account_token,
             account::account_set_token,
             account::account_clear_token,
             // Connect — per-host plugin install

@@ -265,6 +265,12 @@ pub fn brain_start(state: State<AppState>) -> Result<String, String> {
         cmd.env("KUMIHO_CLAUDE_MODE", "ce");
         cmd.env("KUMIHO_LOCAL_SERVER_ENDPOINT", format!("127.0.0.1:{server_port}"));
         cmd.env_remove("KUMIHO_AUTH_TOKEN");
+    } else if let Some(token) = crate::account::cloud_token() {
+        // Cloud mode: hand the saved token to the SDK bootstrap. It reads
+        // KUMIHO_AUTH_TOKEN — it has no idea our copy lives in the OS keychain,
+        // which is why cloud connections silently did nothing before.
+        cmd.env("KUMIHO_AUTH_TOKEN", token);
+        cmd.env_remove("KUMIHO_CLAUDE_MODE");
     }
 
     let child = cmd

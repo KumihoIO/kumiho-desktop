@@ -297,9 +297,17 @@
   }
   async function setupCloud(){
     const token=$('c-token').value.trim(); if(!token){ setLog('cloud-log','Paste a service token, or get one on the web.',true); return; }
-    try{ await invoke('account_set_token',{ token });
+    setLog('cloud-log','saving and checking the token…');
+    try{ await invoke('account_set_token',{ token }); }
+    catch(e){ setLog('cloud-log','Could not save the token: '+String(e),true); return; }
+    try{ const r=await cloudProbe(token);
+      if(r.status===401||r.status===403){ setLog('cloud-log','Kumiho Cloud rejected that token (HTTP '+r.status+'). Issue a new service token and try again.',true); return; }
+      if(r.ok){ const j=await r.json(); setLog('cloud-log','✓ connected to '+(j.tenant_name||j.tenant_id||'your tenant')+'. Opening…'); }
+      else setLog('cloud-log','Token saved — cloud check returned HTTP '+r.status+'. Continuing.');
+    }catch(e){ setLog('cloud-log','Token saved (cloud unreachable right now). Continuing…'); }
+    try{
       await invoke('desktop_config_set',{ cfg:{ configured:true, mode:'cloud', server_port:9190, neo4j_port:7687, redis_port:6379, use_redis:false, local_user:'' } });
-      MODE='cloud'; setLog('cloud-log','✓ Connected. Opening…'); setTimeout(enterApp,800);
+      MODE='cloud'; setTimeout(enterApp,900);
     }catch(e){ setLog('cloud-log',String(e),true); }
   }
 
@@ -356,10 +364,27 @@
       else { setLog('log-run',msg,true); } }
     refreshRun(); }
 
+  const DISCOVERY='https://control.kumiho.cloud/api/discovery/tenant';
+  async function cloudProbe(token){
+    return fetch(DISCOVERY,{ method:'POST',
+      headers:{ 'Authorization':'Bearer '+token, 'Content-Type':'application/json' }, body:'{}' });
+  }
   async function refreshAccount(){
-    try{ const s=await invoke('account_status'); const e=$('tok-pill'); e.textContent=s.has_token?'in keychain':'not set'; e.className='pill '+(s.has_token?'on':'off'); }catch(e){}
-    try{ const r=await fetch('https://control.kumiho.cloud/health'); const ok=r.ok; $('cloud-pill').textContent=ok?'cloud reachable':'cloud down'; $('cloud-pill').className='pill '+(ok?'on':'off'); }
-    catch(e){ $('cloud-pill').textContent='cloud down'; $('cloud-pill').className='pill off'; }
+    let s=null; try{ s=await invoke('account_status'); }catch(e){ setLog('account',String(e),true); }
+    if(s){ const e=$('tok-pill'); e.textContent=s.has_token?'in keychain':'not set';
+      e.className='pill '+(s.has_token?'on':'off');
+      if(s.error) setLog('account','credential store: '+s.error, true); }
+    // Real check: does the saved token actually resolve a tenant?
+    const p=$('cloud-pill'); if(!p) return;
+    try{
+      const token=await invoke('account_token');
+      if(!token){ p.textContent='no token'; p.className='pill off'; return; }
+      const r=await cloudProbe(token);
+      if(r.ok){ const j=await r.json();
+        p.textContent='cloud · '+(j.tenant_name||j.tenant_id||'connected'); p.className='pill on'; }
+      else { p.textContent='token rejected ('+r.status+')'; p.className='pill off';
+        setLog('account','Kumiho Cloud rejected the token (HTTP '+r.status+'). Check it was pasted whole, or issue a new service token.',true); }
+    }catch(e){ p.textContent='cloud unreachable'; p.className='pill off'; }
   }
   async function saveToken(){ const token=$('a-token').value.trim(); if(!token){setLog('account','Paste a token first.',true);return;}
     try{ await invoke('account_set_token',{token}); $('a-token').value=''; setLog('account','✓ saved to keychain'); toast('✓ token saved'); }catch(e){ setLog('account',String(e),true);} refreshAccount(); }
