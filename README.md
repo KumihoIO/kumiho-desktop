@@ -1,223 +1,127 @@
-# Kumiho Brain 🦊🧠
+# Kumiho Desktop 🦊🧠
 
-A real-time, GPU-rendered **Second Brain** — the living Kumiho memory graph as a
-slowly rotating orb of glowing memory points, growing the moment memories are
-written, from any client. Implements
-[kumiho-SDKs#57](https://github.com/KumihoIO/kumiho-SDKs/issues/57); evolves the
-DECISION.VAULT prototype and the `docs/design/kumiho-brain-northstar.html`
-look & feel into a live product. **No mock data anywhere** — everything on
-screen is read from a real tenant through the Rust `kumiho` SDK.
+The control center for **Kumiho Memory** — set up the server, connect your
+agents, and watch your memory graph grow, live.
 
-![Kumiho Brain — the living memory graph rendered as a glowing nebula of memory points, streamed live from a real tenant through the Rust kumiho SDK](docs/kumiho-brain.png)
+![Kumiho Brain — the living memory graph rendered as a glowing nebula of memory points, streamed from your own server](docs/kumiho-brain.png)
 
-```
-dashboard/
-  src/            Rust backend — axum + tokio + the `kumiho` crate (rust/)
-  static/         WebGL2 frontend — no build step, no external requests
-```
+Kumiho Desktop is a small native app (Tauri + Rust) that gives the whole Kumiho
+stack one front door:
+
+| | |
+|---|---|
+| **See** | Your living memory graph, GPU-rendered — memories bloom into the orb the moment any client writes them. This is the main view. |
+| **Run** | Install, start, stop and health-check the local **Community Edition** server, plus its Neo4j/Redis containers. Tells you when a newer CE is out and updates it in one click. |
+| **Connect** | The exact commands to install Kumiho Memory into Claude Code, ChatGPT/Codex, and friends — copy, paste, done. |
+| **Account** | Your Kumiho Cloud token, stored in the OS keychain (Keychain / Credential Manager / libsecret) — never a plaintext file. |
+| **Upgrade** | Community Edition vs Kumiho Cloud, side by side, when you outgrow one machine. |
+
+---
 
 ## Install
 
-**One line, no Rust required** — prebuilt binaries for Linux (x86_64,
-aarch64), macOS (Apple Silicon), and Windows (x86_64):
+Grab the installer for your platform from
+[**Releases**](https://github.com/KumihoIO/kumiho-desktop/releases):
 
-macOS / Linux:
+| Platform | File |
+|---|---|
+| Windows | `.exe` (NSIS) or `.msi` |
+| Linux | `.deb` or `.AppImage` |
+| macOS (Apple Silicon) | `.dmg` |
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/KumihoIO/kumiho-desktop/main/scripts/install.sh | sh
-```
+The installer bundles the graph renderer as a sidecar, so the **See** view works
+with nothing else to install.
 
-Windows (PowerShell):
+## First run
 
-```powershell
-irm https://raw.githubusercontent.com/KumihoIO/kumiho-desktop/main/scripts/install.ps1 | iex
-```
+A setup wizard asks one question — **where should your memory live?**
 
-The installer picks the binary for your platform from the newest
-[`brain-v*` release](https://github.com/KumihoIO/kumiho-desktop/releases?q=brain-v&expanded=true),
-verifies it against the release's SHA256 checksums before touching your disk,
-and installs a single self-contained file (the frontend is embedded) to
-`~/.kumiho/bin`. Pin a version with `VERSION=v0.1.0` (`$env:KUMIHO_VERSION` on
-Windows); change the destination with `INSTALL_DIR` (`$env:KUMIHO_INSTALL_DIR`).
+- **Community Edition** — free, single-user, entirely on your machine. The
+  wizard installs the CE server, brings up **Neo4j (and optionally Redis) in
+  Docker**, writes `~/.kumiho/server.toml`, and starts everything. If you already
+  run Neo4j/Redis, it reuses them instead of creating duplicates.
+- **Kumiho Cloud** — managed. Paste a service token (kept in your OS keychain)
+  and you're connected.
 
-With Rust installed, `cargo install` works anywhere the prebuilts don't —
-the `kumiho` SDK comes from crates.io and falls back to a vendored `protoc`
-when none is installed, so there's no submodule or system-protoc setup:
+You can switch later from **Settings → Upgrade**.
 
-```bash
-cargo install --git https://github.com/KumihoIO/kumiho-desktop kumiho-brain
-```
+### Requirements
 
-Maintainers cut a release by pushing a `brain-v*` tag matching
-`dashboard/Cargo.toml` — `.github/workflows/brain-release.yml` builds all four
-platforms, writes `checksums.txt`, and publishes the GitHub release.
+- **Community Edition** — Docker, for Neo4j 5.x (+ optional Redis 7.x). The app
+  detects Docker and shows a copy-paste install command if it's missing. Prefer
+  to run your own databases? Do — Kumiho reuses whatever is already listening on
+  those ports.
+- **Kumiho Cloud** — an account at [kumiho.io](https://kumiho.io) and a service
+  token.
 
-## Run it
+> Community Edition binds loopback only and is single-user by design: the server
+> caps concurrent connections (compiled in). If memory calls stall while the port
+> still listens, it is connection-starved — **Settings → Run → Restart** clears it.
 
-```bash
-kumiho-brain --open        # serves and opens your browser → http://127.0.0.1:8090
-```
+## The Brain view
 
-Or from a clone:
+Not a chart of your memory — your memory, rendered.
 
-```bash
-git clone https://github.com/KumihoIO/kumiho-desktop
-cd kumiho-desktop
-cargo run -- --open        # → http://127.0.0.1:8090
-```
+- **Snapshot + live** — one sweep per memory kind, then a subscription to the
+  server's event stream. A new memory blooms into the orb and tops the
+  "recently registered" feed within a second or two of the write.
+- **WebGL2, no libraries** — particle drift and spring-to-anchor motion
+  integrated GPU-side via transform feedback; points drawn as instanced billboard
+  quads; typed interlinks colored per edge type; GPU color-picking for exact
+  click-to-inspect.
+- **Graph-aware layout** — a deterministic spring pass pulls linked memories
+  together, so real interlinks read as the short local web they are.
 
-(If the default port is busy, the next free one is picked automatically.)
+Drag to orbit · scroll to zoom · click to inspect · `/` to search · `V` to switch
+between one sphere and a constellation of spaces.
 
-Connection follows the standard SDK bootstrap chain: bearer token from
-`~/.kumiho` → control-plane discovery → your cloud tenant; with no token it
-probes a loopback self-hosted CE server. Options:
-
-```
---open, -o             open the dashboard in your browser once serving
---endpoint HOST:PORT   explicit kumiho-server (or KUMIHO_BRAIN_ENDPOINT)
---tenant SLUG          pin discovery to a tenant
---local                force the loopback self-hosted CE server
---port N               HTTP port (default 8090; auto-slides if busy unless explicit)
---bind ADDR            listen interface (default 127.0.0.1 — memory is private)
---key SECRET           access key for non-loopback clients (else auto-managed)
---no-auth              serve a non-loopback bind without any key (not recommended)
---edge-revs N          newest revisions per item scanned for edges (default 3, 0 = all)
---static-dir DIR       serve the frontend from disk instead of the embedded copy
-                       (frontend dev without recompiling)
-```
-
-System `protoc` is optional — the `kumiho` crate's default `vendored-protoc`
-feature provides one, and the SDK is a crates.io dependency, so there's no
-proto submodule to check out.
-
-### Remote access
-
-The dashboard serves your whole memory graph, so it only listens on loopback
-by default. To reach it from another machine:
+## Build from source
 
 ```bash
-cargo run -- --bind 0.0.0.0
+cargo install tauri-cli --version "^2"
 ```
 
-Non-loopback binds are gated behind an **access key**: `--key`/
-`KUMIHO_BRAIN_KEY` if provided, otherwise one is generated and persisted at
-`$KUMIHO_CONFIG_DIR/kumiho-brain.key` (mode 0600) so it stays stable across
-restarts. The startup banner prints the ready-to-open URL
-(`http://<lan-ip>:8090/?key=…`) — the key is needed once per browser (a
-session cookie takes over, including for the WebSocket), and loopback clients
-never need it. An SSH tunnel (`ssh -L 8090:127.0.0.1:8090 host`) remains the
-zero-config alternative.
+On Debian/Ubuntu, install the Tauri system dependencies first:
 
-## What it does
-
-- **Snapshot** — one `item_search` sweep per memory kind (`conversation`,
-  `fact`, `entity` + `code_decision`, `code_anchor`, `code_evidence`; both sets
-  env-configurable), then per item `get_revisions` + `get_edges` under bounded
-  concurrency. Nodes are **items** (revisions are versions of the same memory);
-  cross-item revision edges become typed interlinks, same-item `SUPERSEDES`
-  chains surface as revision lineage in the detail card.
-- **Live** — subscribes to the server `EventStream` (cursor-resumable,
-  exponential-backoff reconnect). A `revision.created` upserts the node and
-  pushes `node_added` / `node_updated` over the WebSocket; new memories **bloom
-  into the orb** and top the "Recently registered" feed within a second or two
-  of the write.
-- **Render (WebGL2, pure — no libraries)** — particle drift + spring-to-anchor
-  motion integrated GPU-side via **transform feedback**; points drawn as
-  **instanced** billboard quads reading the TF buffer; edge lines fetch endpoint
-  positions from an RGBA32F texture refreshed by a GPU→GPU `PIXEL_UNPACK` copy;
-  procedural fbm nebula at half resolution; GPU color-picking for exact
-  click-to-inspect. A runtime health check flips to an equivalent
-  stateless-drift path if a driver mishandles TF (and under
-  `prefers-reduced-motion` the scene renders on demand, without the sim).
-  The M2 `readPixels` center-glow self-check logs `✓ glow verified`.
-- **Audit, made fun** — typed interlinks colored per edge type with a live
-  legend (real type names found in the graph), top hubs by degree,
-  neighborhood highlight on selection, edge pulses when a memory is touched,
-  per-space highlight/filter, search (`/`) that dims non-matches, and a detail
-  card (summary · typed links you can jump along · revision lineage · tags).
-  The layout is **graph-aware**: a deterministic spring pass pulls linked
-  memories together so real interlinks read as the short local web of the
-  north-star (a live-inserted memory attaches beside what it links to).
-  Beneath the typed layer, faint **proximity filaments** (k-nearest over the
-  layout, the north-star's lattice) are a render treatment like the nebula —
-  colorless, non-interactive, excluded from the legend and the audit.
-- **One brain** — the Sources panel aggregates whoever actually writes
-  (`source_client` metadata when present, else the author identity), and every
-  filter is derived from the data — nothing is hardcoded.
-- **Views** — `UNIFIED` (one sphere) ⇄ `SPACES` (a constellation: the biggest
-  spaces get their own sphere, the long tail shares an "other" cluster; the
-  camera reframes and the springs morph the layout live). Toggle with `V`.
-
-## Contract (backend ↔ frontend)
-
-`GET /api/snapshot` and the first WebSocket frame after readiness carry the
-same payload:
-
-```jsonc
-{ "t": "snapshot", "generated_at": 1783932768440, "endpoint": "…",
-  "spaces": [{ "id": 0, "path": "/CognitiveMemory/work" }],
-  "nodes":  [{ "id": 3, "kref": "kref://…/x.conversation", "kind": "conversation",
-               "item_kind": "conversation", "title": "…", "space": 0,
-               "source": "Claude Code", "memory_type": "episodic",
-               "created_at": "…", "updated_at": "…", "revs": 15, "seed": 687684104 }],
-  "edges":  [{ "src": 3, "dst": 9, "type": "SUPERSEDES" }],
-  "tenant": { "node_count": 32332, "node_limit": 1000000, "tenant_id": "…" } }
+```bash
+sudo apt update && sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-Stream events: `hello`, `status {core, live, info}`, `node_added`,
-`node_updated`, `edge_added`, `node_removed {id}`, `heartbeat`. Detail lookups:
-`GET /api/node/{id}` → node + `summary`, `tags`, `links[{type, dir, id?, title,
-kref}]`, `revisions[]`. Health: `GET /api/healthz`.
+Then:
 
-`seed` is a stable FNV-1a hash of the item kref — layouts are deterministic
-across reloads and clients.
+```bash
+cargo build --release            # builds kumiho-brain (the graph server)
+cargo tauri dev                  # runs Kumiho Desktop
+```
 
-## Answers to #57's open questions
+In a source checkout the app looks for `kumiho-brain` next to its own executable
+first (that's the bundled sidecar in installed builds), then falls back to
+`~/.kumiho/bin/kumiho-brain` — so copy the release build there for development:
 
-1. **Live source** — the SDK *does* expose a watch: `Client::event_stream`
-   (gRPC server-stream, cursor resume, `studio`-tier retention). Used directly;
-   no polling needed.
-2. **Repo location** — `dashboard/` in kumiho-SDKs (this directory), a
-   standalone crate depending on `kumiho` by path: dogfooding the SDK from
-   inside its own repo.
-3. **Auth/tenant** — reuses the SDK token loader + discovery verbatim
-   (`ClientBuilder::default()`); `--local` / `--endpoint` / `--tenant` override.
-4. **Space→sphere at scale** — top spaces by population get spheres (≤22),
-   the tail shares an "other" cluster; per-space highlight stays exact for
-   every space regardless of clustering.
+```bash
+cp target/release/kumiho-brain ~/.kumiho/bin/
+```
 
-## SDK / server gaps found while dogfooding (per #57, filed here first)
+## Repo layout
 
-- **No `edge.created` event.** `CreateEdge` emits nothing on the event stream
-  (verified live). The dashboard compensates: each `revision.created` diffs
-  that revision's edges immediately **and again ~4 s later** (writers attach
-  edges right after the revision, which the immediate check can't see). A
-  first-class edge event would remove the residual blind spot (edges created
-  long after their revisions, between two old revisions).
-- **Memories don't record their originating client.** Today's revision
-  metadata has `created_by`/`username` (author identity) but nothing like
-  `source_client`; the "one brain across Claude Code / Codex / Revka" story
-  (M5) needs writers to stamp it. The dashboard already reads
-  `source_client` | `client` | `agent` and falls back to the author, so badges
-  light up as soon as writers start stamping.
-- **`CreateEdge` returns only a status**, so the SDK synthesizes the `Edge`
-  client-side without `created_at` — snapshot edge recency can't be shown.
-- **Rust `get_item_by_kref` re-validates krefs** and rejects some
-  server-accepted URIs (e.g. Unicode item names; Python 0.9.20 has the same
-  issue in `get_items`). The live path degrades gracefully (derives item fields
-  from the revision + event) but a `Kref::unchecked` lookup path would be
-  cleaner.
-- **The resolved endpoint isn't exposed on `Client`**, so the HUD can't show
-  which server discovery picked without re-deriving it.
+```
+src-tauri/     the Tauri app — Run / Connect / Account / Upgrade commands
+desktop-ui/    the control-center frontend (no build step)
+src/  static/  kumiho-brain: the axum + WebGL2 memory-graph server (the See view)
+scripts/       installers for the standalone brain binary
+docs/          notes and assets
+```
 
-## Non-goals (v1) & notes
+Releases are cut by pushing a `desktop-v*` tag —
+[`desktop-release.yml`](.github/workflows/desktop-release.yml) builds every
+platform and attaches the installers.
 
-- Read-only: no editing/deleting memory from the dashboard.
-- LOD guardrail: snapshot kinds are filtered server-side and edges scan the
-  newest `--edge-revs` revisions per item; the render comfortably holds 10k+
-  animated points at 60 fps on hardware GL (instancing + TF; verified ~33 fps
-  even on SwiftShader software rasterization).
-- WebGPU (M6 stretch) not included; the TF/instancing split keeps a future
-  compute-shader path drop-in.
-- The binary embeds the frontend at compile time (single-file deploy);
-  `--static-dir` serves from disk for development.
+## Links
+
+- [kumiho.io](https://kumiho.io) — product, pricing, docs
+- [KumihoIO/kumiho-plugins](https://github.com/KumihoIO/kumiho-plugins) — agent plugins (Claude Code, Codex, …)
+- [KumihoIO/kumiho-server-community](https://github.com/KumihoIO/kumiho-server-community) — the Community Edition server
+- [`kumiho`](https://crates.io/crates/kumiho) — the Rust SDK this app talks through
+- Paper: *Graph-Native Cognitive Memory for AI Agents* — [arXiv:2603.17244](https://arxiv.org/abs/2603.17244)
+
+MIT licensed. Community Edition itself ships under its own EULA.
