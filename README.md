@@ -13,7 +13,7 @@ stack one front door:
 | **See** | Your living memory graph, GPU-rendered — memories bloom into the orb the moment any client writes them. This is the main view. |
 | **Run** | Install, start, stop and health-check the local **Community Edition** server, plus its Neo4j/Redis containers. Tells you when a newer CE is out and updates it in one click. |
 | **Connect** | The exact commands to install Kumiho Memory into Claude Code, ChatGPT/Codex, and friends — copy, paste, done. |
-| **Account** | Your Kumiho Cloud token, stored in the OS keychain (Keychain / Credential Manager / libsecret) — never a plaintext file. |
+| **Account** | Your Kumiho Cloud token, stored in the OS keychain (Keychain / Credential Manager / libsecret) — never a plaintext file. **Save & connect** switches this app to Cloud; **Clear & use CE** brings it back to your local server. |
 | **Upgrade** | Community Edition vs Kumiho Cloud, side by side, when you outgrow one machine. |
 
 ---
@@ -32,6 +32,21 @@ Grab the installer for your platform from
 The installer bundles the graph renderer as a sidecar, so the **See** view works
 with nothing else to install.
 
+> On Windows the build isn't code-signed yet, so SmartScreen may say
+> "unrecognized app" → **More info → Run anyway**. macOS builds are signed and
+> notarized.
+
+### Staying up to date
+
+After the first install, Kumiho Desktop **updates itself**. It checks quietly on
+launch and shows an **Update** button in the header when a new signed release is
+out — one click downloads, installs, and relaunches. No coming back here for
+links.
+
+Auto-update covers **macOS** (Apple Silicon), the **Windows** `.exe` installer,
+and the Linux **AppImage**. The `.deb`/`.rpm` packages and Intel Macs update by
+re-downloading from Releases.
+
 ## First run
 
 A setup wizard asks one question — **where should your memory live?**
@@ -43,7 +58,9 @@ A setup wizard asks one question — **where should your memory live?**
 - **Kumiho Cloud** — managed. Paste a service token (kept in your OS keychain)
   and you're connected.
 
-You can switch later from **Settings → Upgrade**.
+You can switch anytime from **Settings → Account**: paste a token and
+**Save & connect** for Cloud, or **Clear & use CE** to return to your local
+server. **Settings → Upgrade** compares the two side by side.
 
 ### Requirements
 
@@ -114,7 +131,8 @@ docs/          notes and assets
 
 Releases are cut by pushing a `desktop-v*` tag —
 [`desktop-release.yml`](.github/workflows/desktop-release.yml) builds every
-platform and attaches the installers.
+platform, signs the bundles, and publishes the installers alongside the
+`latest.json` manifest the in-app updater reads.
 
 ## Links
 
