@@ -11,6 +11,7 @@ mod config;
 mod connect;
 mod docker;
 mod run;
+mod startup;
 mod update;
 mod upgrade;
 mod util;
@@ -35,6 +36,10 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // First-run + app config
@@ -69,6 +74,9 @@ fn main() {
             // Update — in-app auto-update
             update::check_update,
             update::install_update,
+            // Startup — launch at login
+            startup::autostart_get,
+            startup::autostart_set,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Kumiho Desktop")

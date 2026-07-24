@@ -15,6 +15,11 @@ pub struct DesktopConfig {
     pub redis_port: u16,
     pub use_redis: bool,
     pub local_user: String,
+    /// Bring the CE server + its databases up automatically when the app starts
+    /// (CE mode only). `serde(default)` keeps older desktop.json files — and the
+    /// setup wizard's explicit 7-field writes — deserializing cleanly.
+    #[serde(default)]
+    pub autostart_infra: bool,
 }
 
 impl Default for DesktopConfig {
@@ -27,6 +32,7 @@ impl Default for DesktopConfig {
             redis_port: 6379,
             use_redis: true,
             local_user: String::new(),
+            autostart_infra: false,
         }
     }
 }

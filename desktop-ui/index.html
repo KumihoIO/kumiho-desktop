@@ -197,6 +197,11 @@
         <div class="row" style="font-size:13px" id="db-lines"></div>
         <div class="row"><button onclick="dbUp()">Start DBs</button><button onclick="cmd('docker_down','run')">Stop DBs</button></div>
       </div>
+      <div class="card">
+        <div class="row"><div class="grow"><span class="b">Startup</span> <span class="faint">run Kumiho hands-free</span></div></div>
+        <label class="row" style="gap:8px;cursor:pointer;margin-top:8px"><input type="checkbox" id="cb-login" onchange="setAutostartLogin(this.checked)"><span>Launch Kumiho Desktop when I sign in</span></label>
+        <label class="row" style="gap:8px;cursor:pointer;margin-top:6px"><input type="checkbox" id="cb-infra" onchange="setAutostartInfra(this.checked)"><span id="cb-infra-lbl">Start the CE server &amp; databases automatically on launch</span></label>
+      </div>
       <div class="log" id="log-run"></div>
     </section>
 
@@ -267,7 +272,8 @@
     Promise.resolve().then(pred).then(ok=>{ if(ok) return resolve(true); if(Date.now()-t0>ms) return resolve(false); setTimeout(tick,800); })
       .catch(()=>{ if(Date.now()-t0>ms) return resolve(false); setTimeout(tick,800); }); })(); }); }
   async function adoptCE(){
-    const cfg={ configured:true, mode:'ce', server_port:+$('f-server').value||9190, neo4j_port:+$('f-neo').value||7687,
+    let cur={}; try{ cur=await invoke('desktop_config_get'); }catch(e){}
+    const cfg={ ...cur, configured:true, mode:'ce', server_port:+$('f-server').value||9190, neo4j_port:+$('f-neo').value||7687,
       redis_port:+$('f-redis').value||6379, use_redis:$('f-usered').checked, local_user:$('f-user').value.trim()||'me' };
     try{ await invoke('desktop_config_set',{cfg}); }catch(e){}
     MODE='ce'; setLog('ce-log','✓ Community Edition ready. Opening…'); setTimeout(enterApp,700);
@@ -306,7 +312,8 @@
     if(r.ok) setLog('cloud-log','✓ connected to '+(r.tenant||'your tenant')+'. Opening…');
     else setLog('cloud-log','Token saved — cloud check unavailable ('+(r.error||('HTTP '+r.status))+'). Continuing…');
     try{
-      await invoke('desktop_config_set',{ cfg:{ configured:true, mode:'cloud', server_port:9190, neo4j_port:7687, redis_port:6379, use_redis:false, local_user:'' } });
+      const cur=await invoke('desktop_config_get').catch(()=>({}));
+      await invoke('desktop_config_set',{ cfg:{ ...cur, configured:true, mode:'cloud', server_port:9190, neo4j_port:7687, redis_port:6379, use_redis:false, local_user:'' } });
       MODE='cloud'; setTimeout(enterApp,900);
     }catch(e){ setLog('cloud-log',String(e),true); }
   }
@@ -352,6 +359,30 @@
     }catch(e){}
     try{ const d=await invoke('docker_status'); $('docker-pill').textContent=d.available?'docker ok':'no docker'; $('docker-pill').className='pill '+(d.available?'on':'off');
       $('db-lines').innerHTML=`<span class="pill ${d.neo4j?'on':'off'}">Neo4j</span> <span class="pill ${d.redis?'on':'off'}">Redis</span>`; }catch(e){}
+    refreshStartup();
+  }
+  // ---------- Startup: launch at login + auto-start CE infra ----------
+  async function refreshStartup(){
+    try{ $('cb-login').checked = await invoke('autostart_get'); }catch(e){}
+    try{ const c=await invoke('desktop_config_get');
+      $('cb-infra').checked = !!c.autostart_infra;
+      const ce = c.mode==='ce';
+      $('cb-infra').disabled = !ce;
+      $('cb-infra-lbl').className = ce ? '' : 'faint';
+      $('cb-infra-lbl').textContent = ce
+        ? 'Start the CE server & databases automatically on launch'
+        : 'Start the CE server & databases automatically on launch (Community Edition only)';
+    }catch(e){}
+  }
+  async function setAutostartLogin(on){
+    try{ await invoke('autostart_set',{enabled:on}); toast(on?'✓ will launch at sign-in':'won’t launch at sign-in'); }
+    catch(e){ toast('Could not change login startup: '+String(e),true); refreshStartup(); }
+  }
+  async function setAutostartInfra(on){
+    try{ const c=await invoke('desktop_config_get');
+      await invoke('desktop_config_set',{cfg:{...c, autostart_infra:on}});
+      toast(on?'✓ CE will start on launch':'CE auto-start off'); }
+    catch(e){ toast(String(e),true); refreshStartup(); }
   }
   async function ceRestart(){ setLog('log-run','restarting…'); try{await invoke('ce_stop');}catch(e){} setTimeout(()=>cmd('ce_start','log-run'),900); }
   async function dbUp(){ const c=await invoke('desktop_config_get'); setLog('log-run','starting databases…');
@@ -476,10 +507,43 @@
     refreshStatus();
   }
 
+  // Bound a promise so a hung CLI (e.g. `docker start` against a daemon still
+  // warming up at login) can't stall startup forever.
+  const withTimeout=(p,ms)=>Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('timed out')),ms))]);
+
+  // On launch, optionally bring the local CE infra up (server + Docker DBs) before
+  // the Brain, so a hands-free start lands on a live graph, not an empty one. Only
+  // in CE mode, only when the toggle is on, and only if CE isn't already reachable.
+  let BOOTING=false;
+  async function bootInfraThenBrain(){
+    if(BOOTING) return;   // enterApp can be re-entered (boot / adoptCE / setupCloud)
+    BOOTING=true;
+    try{
+      if(MODE==='ce'){
+        let cfg={}; try{ cfg=await invoke('desktop_config_get'); }catch(e){}
+        if(cfg.autostart_infra){
+          let ce={reachable:false}; try{ ce=await invoke('ce_status'); }catch(e){}
+          if(!ce.reachable){
+            toast('Starting Community Edition…');
+            // Best-effort and time-bounded. Empty password reuses the containers
+            // made during setup; if the Docker daemon is still coming up at login,
+            // these may fail — we don't block the app, we just poll for CE and, if
+            // it never answers, point the user at the Run tab.
+            try{ await withTimeout(invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis}), 25000); }catch(e){}
+            try{ await withTimeout(invoke('ce_start'), 15000); }catch(e){}
+            const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable).catch(()=>false), 45000);
+            if(!up) toast('Community Edition is still starting — open ⚙ → Run if it doesn’t appear.', true);
+          }
+        }
+      }
+      await startBrain();
+    } finally { BOOTING=false; }
+  }
+
   function enterApp(){ closeSettings(); $('setup').classList.remove('show'); $('app').style.display='flex';
     $('brand-sub').textContent = MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
     refreshStatus();
-    startBrain();   // always launch a fresh, mode-correct Brain (clears any stale/cloud one)
+    bootInfraThenBrain();   // optional CE infra autostart, then a fresh mode-correct Brain
     setInterval(refreshStatus, 5000);
   }
 
