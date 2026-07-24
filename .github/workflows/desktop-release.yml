@@ -51,10 +51,28 @@ jobs:
           fi
           echo "staged sidecar: kumiho-brain-${TRIPLE}"
 
+      - name: Restore App Store Connect API key (macOS notarization)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          mkdir -p "$HOME/private_keys"
+          KEY_PATH="$HOME/private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8"
+          echo "${{ secrets.APPLE_API_KEY_B64 }}" | base64 -d > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
       - name: Build + release Kumiho Desktop
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple signing + notarization — macOS runner only. Left empty on the
+          # Linux/Windows jobs so tauri never attempts a keychain import there.
+          APPLE_CERTIFICATE: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos-latest' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_API_ISSUER: ${{ matrix.os == 'macos-latest' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ matrix.os == 'macos-latest' && secrets.APPLE_API_KEY || '' }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
         with:
           projectPath: .
           tagName: ${{ github.ref_name }}
