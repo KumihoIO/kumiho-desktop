@@ -52,6 +52,11 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      # Serialize the matrix: all three jobs update the SAME release's
+      # latest.json, and tauri-action does read-existing-then-reupload. Run in
+      # parallel and it's a last-writer-wins race that drops platform entries;
+      # sequential, each job merges its platform onto the previous manifest.
+      max-parallel: 1
       matrix:
         os: [windows-latest, ubuntu-22.04, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -99,6 +104,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing (all platforms) — produces the .sig files + latest.json
+          # that the in-app auto-updater verifies against the embedded public key.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Apple signing + notarization — macOS runner only. Left empty on the
           # Linux/Windows jobs so tauri never attempts a keychain import there.
           APPLE_CERTIFICATE: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE || '' }}

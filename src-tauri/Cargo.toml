@@ -5,7 +5,7 @@
 # Own [workspace] so it stays independent of the root kumiho-brain crate.
 [package]
 name = "kumiho-desktop"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.77"
 description = "Kumiho Desktop — control center for Kumiho Memory (CE/Cloud, plugins, Brain view)"
@@ -16,6 +16,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2"          # in-app auto-update (signed artifacts + latest.json)
+tauri-plugin-single-instance = "2"  # collapse a duplicate launch (updater relaunch on Windows)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"      # locate ~/.kumiho for the Run pillar

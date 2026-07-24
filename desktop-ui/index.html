@@ -158,6 +158,7 @@
       <span><span class="dot" id="dot-brain"></span> Brain</span>
     </div>
     <div class="grow"></div>
+    <button class="sm ghost" id="upd-btn" onclick="checkUpdate(true)">Check for updates</button>
     <button class="sm" onclick="startBrain()">Restart Brain</button>
     <button class="sm" onclick="loadBrain()">Reload</button>
     <button class="icon" title="Settings" onclick="openSettings()">⚙</button>
@@ -464,7 +465,9 @@
 
   // ---------- Brain (main view) ----------
   function loadBrain(){ $('brain-frame').src='http://127.0.0.1:8090/?t='+Date.now(); }
-  async function startBrain(){ toast('restarting Brain…');
+  async function startBrain(){
+    if(UPDATING) return;   // don't respawn kumiho-brain into the installer's file swap
+    toast('restarting Brain…');
     try{ await invoke('brain_stop'); }catch(e){}
     await new Promise(r=>setTimeout(r,500));
     try{ await invoke('brain_start'); }catch(e){ toast(String(e),true); }
@@ -480,6 +483,28 @@
     setInterval(refreshStatus, 5000);
   }
 
+  // ---------- app auto-update (Tauri updater) ----------
+  let UPDATING=false;
+  function setUpdBtn(mode,ver){ const b=$('upd-btn'); if(!b) return;
+    if(mode==='available'){ b.textContent='⬆ Update to v'+ver; b.className='sm primary'; b.onclick=doUpdate; }
+    else { b.textContent='Check for updates'; b.className='sm ghost'; b.onclick=()=>checkUpdate(true); }
+  }
+  async function checkUpdate(manual){
+    if(manual){ const b=$('upd-btn'); if(b) b.textContent='Checking…'; }
+    try{ const u=await invoke('check_update');
+      if(u.available){ setUpdBtn('available',u.version); if(manual) toast('Update v'+u.version+' available'); }
+      else { setUpdBtn('idle'); if(manual) toast('You’re on the latest (v'+u.current+')'); }
+    }catch(e){ setUpdBtn('idle'); if(manual) toast('Update check failed: '+String(e),true); }
+  }
+  async function doUpdate(){ if(UPDATING) return; UPDATING=true;
+    const b=$('upd-btn'); if(b){ b.textContent='Updating…'; b.className='sm'; b.onclick=null; }
+    toast('Downloading update — the app restarts when it’s done…');
+    // install_update relaunches the app on success, so nothing after it runs.
+    try{ await invoke('install_update'); }
+    catch(e){ UPDATING=false; toast('Update failed: '+String(e),true); setUpdBtn('idle');
+      startBrain(); }   // the Brain may have been killed just before a failed swap — bring it back
+  }
+
   // boot
   window.addEventListener('DOMContentLoaded', async ()=>{
     try{ const v=await invoke('app_version'); document.title='Kumiho Desktop v'+v;
@@ -487,6 +512,7 @@
     let cfg={configured:false}; try{ cfg=await invoke('desktop_config_get'); }catch(e){}
     MODE=cfg.mode||'ce';
     if(cfg.configured){ enterApp(); } else { $('setup').classList.add('show'); }
+    checkUpdate(false);   // silent check; surfaces an Update button if one's out
   });
 </script>
 </body>

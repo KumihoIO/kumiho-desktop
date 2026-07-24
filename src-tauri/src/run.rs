@@ -282,14 +282,10 @@ pub fn brain_start(state: State<AppState>) -> Result<String, String> {
     Ok("brain starting on 8090".into())
 }
 
-#[tauri::command]
-pub fn brain_stop(state: State<AppState>) -> Result<String, String> {
-    if let Some(mut child) = state.brain.lock().map_err(|e| e.to_string())?.take() {
-        let _ = child.kill();
-    }
-    // Also clear any orphaned Brain (e.g. one left by a previous app session, or
-    // an old one connected to the cloud) so a restart truly frees 8090 and
-    // relaunches in the current mode.
+/// Kill any Brain sidecar — tracked or orphaned — by process name. Used on a
+/// restart (to free 8090), before an update (so kumiho-brain(.exe) isn't locked
+/// while the installer swaps files), and on app exit.
+pub fn kill_brain() {
     #[cfg(windows)]
     {
         let _ = command("taskkill").args(["/IM", "kumiho-brain.exe", "/F"]).output();
@@ -298,5 +294,16 @@ pub fn brain_stop(state: State<AppState>) -> Result<String, String> {
     {
         let _ = command("pkill").args(["-f", "kumiho-brain"]).output();
     }
+}
+
+#[tauri::command]
+pub fn brain_stop(state: State<AppState>) -> Result<String, String> {
+    if let Some(mut child) = state.brain.lock().map_err(|e| e.to_string())?.take() {
+        let _ = child.kill();
+    }
+    // Also clear any orphaned Brain (e.g. one left by a previous app session, or
+    // an old one connected to the cloud) so a restart truly frees 8090 and
+    // relaunches in the current mode.
+    kill_brain();
     Ok("brain stopped".into())
 }
