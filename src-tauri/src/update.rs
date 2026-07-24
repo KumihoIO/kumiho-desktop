@@ -43,12 +43,31 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
         .ok_or("already up to date")?;
-    // Kill the Brain in the on-download-finish hook — i.e. AFTER the (possibly
-    // long) download succeeds and just BEFORE the installer swaps files. Killing
-    // it up front would leave the main view blank if the download then failed.
-    update
-        .download_and_install(|_, _| {}, || crate::run::kill_brain())
-        .await
-        .map_err(|e| e.to_string())?;
+
+    // GitHub's asset CDN can intermittently 504 on the multi-MB installer (seen
+    // through VPNs) while small files like latest.json succeed — so a single
+    // download failure must not kill the update. Retry a few times. The Brain is
+    // killed in the on-download-finish hook (after a download SUCCEEDS, right
+    // before the swap), so failed attempts never blank the main view, and
+    // download_and_install only installs once the bytes are in hand.
+    let mut installed = false;
+    let mut last_err = String::new();
+    for _ in 0..4 {
+        match update
+            .download_and_install(|_, _| {}, || crate::run::kill_brain())
+            .await
+        {
+            Ok(()) => {
+                installed = true;
+                break;
+            }
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    if !installed {
+        return Err(format!(
+            "update download failed after several tries — check your connection or VPN: {last_err}"
+        ));
+    }
     app.restart();
 }
