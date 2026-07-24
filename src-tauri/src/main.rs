@@ -49,6 +49,7 @@ fn main() {
             account::account_token,
             account::account_set_token,
             account::account_clear_token,
+            account::cloud_probe,
             // Connect — per-host plugin install
             connect::connect_hosts,
             connect::connect_install,
