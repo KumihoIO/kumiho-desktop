@@ -14,7 +14,40 @@ on:
   workflow_dispatch:
 
 jobs:
+  # One release, created once, before any build. Without this the three matrix
+  # jobs each create their own release: GitHub does NOT key drafts by tag, so
+  # duplicate drafts appear for the same tag and the assets split between them
+  # (v0.1.2 shipped mac+win in one draft and all three Linux bundles in another).
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.mk.outputs.result }}
+    steps:
+      - uses: actions/github-script@v7
+        id: mk
+        env:
+          TAG: ${{ github.ref_name }}
+        with:
+          script: |
+            const { owner, repo } = context.repo
+            const tag = process.env.TAG
+            // Re-runs must reuse the release, not add another one.
+            const all = await github.paginate(github.rest.repos.listReleases, { owner, repo })
+            const found = all.find(r => r.tag_name === tag)
+            if (found) return found.id
+            const { data } = await github.rest.repos.createRelease({
+              owner, repo,
+              tag_name: tag,
+              name: `Kumiho Desktop ${tag}`,
+              draft: true,
+              prerelease: false,
+            })
+            return data.id
+
   release:
+    needs: create-release
     permissions:
       contents: write
     strategy:
@@ -75,10 +108,8 @@ jobs:
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
         with:
           projectPath: .
-          tagName: ${{ github.ref_name }}
-          releaseName: "Kumiho Desktop ${{ github.ref_name }}"
-          releaseDraft: true
-          prerelease: false
+          # Upload into the release created above — never create one here.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           # Add the sidecar only for the release build so local `cargo tauri dev`
           # (which has no staged sidecar) keeps working.
           args: '--config {"bundle":{"externalBin":["binaries/kumiho-brain"]}}'
