@@ -62,15 +62,22 @@ jobs:
           - os: windows-latest
             miho_platform: windows
             miho_arch: x64
+            # WiX/MSI packaging cannot currently bundle the private 9miho
+            # sidecar reliably. NSIS is the existing updater-compatible
+            # Windows installer and avoids the failing Candle toolchain.
+            bundle_args: --bundles nsis
           - os: ubuntu-22.04
             miho_platform: linux
             miho_arch: x64
+            bundle_args: ""
           - os: macos-15
             miho_platform: macos
             miho_arch: arm64
+            bundle_args: ""
           - os: macos-15-intel
             miho_platform: macos
             miho_arch: x64
+            bundle_args: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -164,4 +171,4 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           # Add the sidecar only for the release build so local `cargo tauri dev`
           # (which has no staged sidecar) keeps working.
-          args: '--config {"bundle":{"externalBin":["binaries/kumiho-brain","binaries/9miho"]}}'
+          args: '${{ matrix.bundle_args }} --config {"bundle":{"externalBin":["binaries/kumiho-brain","binaries/9miho"]}}'
