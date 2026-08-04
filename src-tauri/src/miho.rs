@@ -9,7 +9,7 @@ use crate::util::{command, kumiho_home};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -66,7 +66,7 @@ fn health_ok() -> bool {
         return false;
     };
     if stream
-        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .set_read_timeout(Some(Duration::from_secs(3)))
         .is_err()
     {
         return false;
@@ -80,22 +80,68 @@ fn health_ok() -> bool {
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
-    let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
+    // Do not use `read_to_string`: it waits for EOF, so a healthy keep-alive
+    // response can be misreported as a timeout after its complete body arrived.
+    // Return as soon as the health JSON is complete instead.
+    let mut response = Vec::with_capacity(512);
+    let mut chunk = [0_u8; 512];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return health_response_ok(&response),
+            Ok(read) => {
+                response.extend_from_slice(&chunk[..read]);
+                if health_response_ok(&response) {
+                    return true;
+                }
+                if response.len() > 64 * 1024 {
+                    return false;
+                }
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return false;
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+fn health_response_ok(response: &[u8]) -> bool {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    let Some(status_line) = headers.lines().next() else {
+        return false;
+    };
+    if !(status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")) {
         return false;
     }
-    if !response.starts_with("HTTP/1.1 200") {
-        return false;
-    }
-    response
-        .split_once("\r\n\r\n")
-        .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
-        .and_then(|body| {
-            body.get("status")
-                .and_then(|status| status.as_str())
-                .map(str::to_owned)
-        })
+    serde_json::from_slice::<serde_json::Value>(&response[header_end + 4..])
+        .ok()
+        .and_then(|body| body.get("status")?.as_str().map(str::to_owned))
         .is_some_and(|status| status == "ok")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::health_response_ok;
+
+    #[test]
+    fn accepts_complete_health_response_without_waiting_for_eof() {
+        assert!(health_response_ok(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\n\r\n{\"status\":\"ok\"}"
+        ));
+    }
+
+    #[test]
+    fn rejects_partial_or_unhealthy_responses() {
+        assert!(!health_response_ok(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\n\r\n{\"status\":"
+        ));
+        assert!(!health_response_ok(
+            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 20\r\n\r\n{\"status\":\"starting\"}"
+        ));
+    }
 }
 
 #[derive(Serialize)]

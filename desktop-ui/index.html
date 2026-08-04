@@ -351,22 +351,35 @@
 
   // ---------- status ----------
   function pill(el,on,txt){ if(!el)return; el.textContent=txt||(on?'reachable':'unreachable'); el.className='pill '+(on?'on':'off'); }
+  let STATUS_REFRESH_IN_FLIGHT=null;
+  let MIHO_CONFIRMED_REACHABLE=false;
+  let MIHO_HEALTH_MISSES=0;
   async function refreshStatus(){
+    if(STATUS_REFRESH_IN_FLIGHT) return STATUS_REFRESH_IN_FLIGHT;
+    STATUS_REFRESH_IN_FLIGHT=(async()=>{
     try{ const ce=await invoke('ce_status'); $('dot-ce').className='dot '+(ce.reachable?'on':'off'); }catch(e){}
     try{ const b=await invoke('brain_status'); $('dot-brain').className='dot '+(b.reachable?'on':'off');
       $('brain-empty').classList.toggle('hide', b.reachable); }catch(e){}
-    try{ const m=await invoke('miho_status'); $('dot-miho').className='dot '+(m.reachable?'on':'off');
-      $('miho-empty').classList.toggle('hide', m.reachable);
+    try{ const m=await invoke('miho_status');
+      if(m.reachable){ MIHO_CONFIRMED_REACHABLE=true; MIHO_HEALTH_MISSES=0; }
+      else if(MIHO_CONFIRMED_REACHABLE) MIHO_HEALTH_MISSES++;
+      const visiblyReachable=m.reachable || (MIHO_CONFIRMED_REACHABLE && MIHO_HEALTH_MISSES<3);
+      if(!visiblyReachable && MIHO_HEALTH_MISSES>=3) MIHO_CONFIRMED_REACHABLE=false;
+      $('dot-miho').className='dot '+(visiblyReachable?'on':'off');
+      $('miho-empty').classList.toggle('hide', visiblyReachable);
       const button=$('miho-install-btn'), copy=$('miho-empty-copy');
       if(button){
-        button.style.display=m.reachable?'none':'inline-flex';
+        button.style.display=visiblyReachable?'none':'inline-flex';
         button.textContent=m.installed?(m.update_available?'Update & start 9miho':'Start 9miho'):'Install 9miho';
         button.disabled=!m.bundled && !m.installed;
       }
-      if(copy && !m.reachable) copy.textContent=!m.bundled && !m.installed
+      if(copy && !visiblyReachable) copy.textContent=!m.bundled && !m.installed
         ? 'This development build has no bundled 9miho runtime. Use a signed Kumiho Desktop release.'
         : (m.update_available?'A newer bundled 9miho is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the bundled runtime; no GitHub login or source toolchain is required.'));
     }catch(e){}
+    })();
+    try{ return await STATUS_REFRESH_IN_FLIGHT; }
+    finally{ STATUS_REFRESH_IN_FLIGHT=null; }
   }
   const CE_LATEST_URL='https://api.github.com/repos/KumihoIO/kumiho-server-community/releases/latest';
   async function ceLatestVersion(){ try{ const r=await fetch(CE_LATEST_URL); if(!r.ok) return null;
@@ -567,7 +580,7 @@
     toast(force?'restarting 9miho…':'starting 9miho…');
     try{ await invoke('miho_start'); }catch(e){ toast(String(e),true); return; }
     const up=await waitFor(()=>invoke('miho_status').then(s=>s.reachable),40000);
-    if(up){ loadMiho(); $('miho-empty').classList.add('hide'); }
+    if(up){ MIHO_CONFIRMED_REACHABLE=true; MIHO_HEALTH_MISSES=0; loadMiho(); $('miho-empty').classList.add('hide'); }
     else toast('9miho did not start on 9999 — see ~/.kumiho/apps/9miho/logs/9miho.log',true);
     refreshStatus();
   }
