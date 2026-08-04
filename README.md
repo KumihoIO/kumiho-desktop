@@ -29,8 +29,9 @@ Grab the installer for your platform from
 | Linux | `.deb` or `.AppImage` |
 | macOS (Apple Silicon) | `.dmg` |
 
-The installer bundles the graph renderer as a sidecar, so the **See** view works
-with nothing else to install.
+The installer bundles the graph renderer and a platform-native **9miho** runtime
+as sidecars. The Desktop app can install and run the 9miho Canvas without source
+access, Python, Node, or a GitHub login.
 
 > On Windows the build isn't code-signed yet, so SmartScreen may say
 > "unrecognized app" → **More info → Run anyway**. macOS builds are signed and
@@ -92,6 +93,19 @@ Not a chart of your memory — your memory, rendered.
 Drag to orbit · scroll to zoom · click to inspect · `/` to search · `V` to switch
 between one sphere and a constellation of spaces.
 
+## 9miho Canvas
+
+Choose **9miho Canvas** in the Desktop header, then click **Install 9miho**. The
+signed prebuild is copied into `~/.kumiho/apps/9miho`, launched on loopback port
+`9999`, and displayed inside the Tauri shell. It uses the same explicit
+Community Edition or Kumiho Cloud selection as the rest of Desktop; switching
+mode never silently falls back to the other service.
+
+9miho is free for local single-user use under its own license. Provider keys and
+generated media remain in 9miho's profile/storage boundary. The Kumiho Cloud
+service token remains in the OS credential store and is injected only into the
+9miho child process when Cloud mode is selected.
+
 ## Build from source
 
 ```bash
@@ -133,6 +147,12 @@ Releases are cut by pushing a `desktop-v*` tag —
 [`desktop-release.yml`](.github/workflows/desktop-release.yml) builds every
 platform, signs the bundles, and publishes the installers alongside the
 `latest.json` manifest the in-app updater reads.
+
+The workflow reads the pinned private build from
+[`src-tauri/9miho-version.json`](src-tauri/9miho-version.json). Repository secret
+`NINE_MIHO_RELEASE_TOKEN` must be a fine-grained token (or GitHub App token) with
+read-only Contents access to `KumihoIO/9miho`. The token is used only by Actions
+to download the private release archive; it is never shipped to users.
 
 ## Links
 

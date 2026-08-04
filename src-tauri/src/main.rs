@@ -10,6 +10,7 @@ mod account;
 mod config;
 mod connect;
 mod docker;
+mod miho;
 mod run;
 mod startup;
 mod update;
@@ -22,6 +23,7 @@ use std::sync::Mutex;
 #[derive(Default)]
 pub struct AppState {
     pub brain: Mutex<Option<std::process::Child>>,
+    pub miho: Mutex<Option<std::process::Child>>,
 }
 
 fn main() {
@@ -56,6 +58,11 @@ fn main() {
             run::brain_status,
             run::brain_start,
             run::brain_stop,
+            // 9miho — bundled install + explicit CE/Cloud launch
+            miho::miho_status,
+            miho::miho_install,
+            miho::miho_start,
+            miho::miho_stop,
             // Docker — Neo4j + Redis dependencies
             docker::docker_status,
             docker::docker_up,
@@ -80,13 +87,14 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Kumiho Desktop")
-        .run(|_app, event| {
+        .run(|app, event| {
             // The Brain runs as a detached child that nothing else reaps. Left
             // alive past the app it keeps kumiho-brain(.exe) locked, so the next
             // install/update can't replace it (the reinstall conflict). Kill it
             // as we exit.
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 run::kill_brain();
+                miho::kill_tracked_miho(app);
             }
         });
 }

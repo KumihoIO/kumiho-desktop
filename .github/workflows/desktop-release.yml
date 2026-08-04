@@ -5,8 +5,8 @@ name: desktop-release
 #   Windows  → NSIS .exe (+ .msi)
 #   Linux    → .deb + .AppImage
 #   macOS    → .dmg
-# Each build bundles the kumiho-brain binary as a sidecar, so the installed app's
-# "See" view works with no separate install.
+# Each build bundles kumiho-brain plus the matching private 9miho prebuild as
+# sidecars, so users never need source access or GitHub credentials.
 
 on:
   push:
@@ -58,7 +58,19 @@ jobs:
       # sequential, each job merges its platform onto the previous manifest.
       max-parallel: 1
       matrix:
-        os: [windows-latest, ubuntu-22.04, macos-latest]
+        include:
+          - os: windows-latest
+            miho_platform: windows
+            miho_arch: x64
+          - os: ubuntu-22.04
+            miho_platform: linux
+            miho_arch: x64
+          - os: macos-15
+            miho_platform: macos
+            miho_arch: arm64
+          - os: macos-15-intel
+            miho_platform: macos
+            miho_arch: x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -90,8 +102,38 @@ jobs:
           fi
           echo "staged sidecar: kumiho-brain-${TRIPLE}"
 
+      - name: Python for private prebuild extraction
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download and stage the private 9miho prebuild
+        shell: bash
+        env:
+          # A fine-grained PAT or GitHub App token with read-only Contents access
+          # to KumihoIO/9miho. It is used only in CI and never enters the bundle.
+          GH_TOKEN: ${{ secrets.NINE_MIHO_RELEASE_TOKEN }}
+        run: |
+          TAG=$(node -p "require('./src-tauri/9miho-version.json').release_tag")
+          VERSION=$(node -p "require('./src-tauri/9miho-version.json').version")
+          ARCHIVE="9miho-${{ matrix.miho_platform }}-${{ matrix.miho_arch }}.zip"
+          test -n "$GH_TOKEN" || (echo "NINE_MIHO_RELEASE_TOKEN is not configured" >&2; exit 1)
+          mkdir -p 9miho-download 9miho-prebuilt src-tauri/binaries
+          gh release download "$TAG" --repo KumihoIO/9miho --pattern "$ARCHIVE*" --dir 9miho-download
+          python -c "import hashlib,pathlib; p=pathlib.Path('9miho-download/$ARCHIVE'); expected=pathlib.Path(str(p)+'.sha256').read_text().split()[0]; actual=hashlib.sha256(p.read_bytes()).hexdigest(); assert actual==expected, (actual,expected)"
+          python -m zipfile -e "9miho-download/$ARCHIVE" 9miho-prebuilt
+          python -c "import json; m=json.load(open('9miho-prebuilt/manifest.json')); assert (m['version'],m['platform'],m['arch'],m['api_port'])==('$VERSION','${{ matrix.miho_platform }}','${{ matrix.miho_arch }}',9999), m"
+          TRIPLE=$(rustc -vV | sed -n 's/host: //p')
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp 9miho-prebuilt/9miho.exe "src-tauri/binaries/9miho-${TRIPLE}.exe"
+          else
+            cp 9miho-prebuilt/9miho "src-tauri/binaries/9miho-${TRIPLE}"
+            chmod +x "src-tauri/binaries/9miho-${TRIPLE}"
+          fi
+          echo "staged 9miho $VERSION for $TRIPLE"
+
       - name: Restore App Store Connect API key (macOS notarization)
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos-')
         shell: bash
         run: |
           mkdir -p "$HOME/private_keys"
@@ -110,11 +152,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # Apple signing + notarization — macOS runner only. Left empty on the
           # Linux/Windows jobs so tauri never attempts a keychain import there.
-          APPLE_CERTIFICATE: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ matrix.os == 'macos-latest' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_API_ISSUER: ${{ matrix.os == 'macos-latest' && secrets.APPLE_API_ISSUER || '' }}
-          APPLE_API_KEY: ${{ matrix.os == 'macos-latest' && secrets.APPLE_API_KEY || '' }}
+          APPLE_CERTIFICATE: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_API_ISSUER: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_API_KEY || '' }}
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
         with:
           projectPath: .
@@ -122,4 +164,4 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           # Add the sidecar only for the release build so local `cargo tauri dev`
           # (which has no staged sidecar) keeps working.
-          args: '--config {"bundle":{"externalBin":["binaries/kumiho-brain"]}}'
+          args: '--config {"bundle":{"externalBin":["binaries/kumiho-brain","binaries/9miho"]}}'

@@ -77,11 +77,18 @@
   header .brand{display:flex;align-items:center;gap:9px;font-weight:650;} header .brand .sub{font-size:11px;color:var(--faint);font-weight:400;}
   header .stat{display:flex;align-items:center;gap:14px;margin-left:8px;font-size:12px;color:var(--dim);}
   header .stat span{display:inline-flex;align-items:center;gap:6px;}
+  .products{display:flex;align-items:center;gap:3px;padding:3px;border:1px solid var(--line);border-radius:9px;background:rgba(255,255,255,.03);}
+  .products button{height:30px;padding:0 12px;border:0;background:transparent;color:var(--dim);}
+  .products button.active{background:rgba(255,255,255,.10);color:#fff;box-shadow:0 1px 8px rgba(0,0,0,.25);}
   .stage{position:relative;flex:1;overflow:hidden;background:#000;}
   .stage iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:#000;}
   .stage .float{position:absolute;top:14px;right:16px;display:flex;gap:8px;z-index:2;}
   .stage .empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;z-index:1;}
   .stage .empty h3{font-size:20px;margin:0;} .stage .empty.hide{display:none;}
+  .product-pane{display:none!important;}
+  iframe.product-pane.active{display:block!important;}
+  .stage .empty.product-pane.active:not(.hide){display:flex!important;}
+  .miho-mark{width:54px;height:54px;display:grid;place-items:center;border-radius:15px;background:linear-gradient(145deg,#ef4c28,#8b1f14);font-size:25px;box-shadow:0 16px 40px rgba(239,76,40,.22);}
   .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:60;font-family:var(--mono);font-size:12px;
     background:#131316;border:1px solid var(--line);border-radius:10px;padding:9px 14px;color:var(--dim);opacity:0;transition:opacity .2s;pointer-events:none;}
   .toast.show{opacity:1;} .toast.bad{color:var(--bad);border-color:rgba(248,113,113,.35);}
@@ -154,23 +161,35 @@
 <div id="app">
   <header>
     <div class="brand">🦊🧠 <span>Kumiho</span> <span class="sub" id="app-ver"></span> <span class="sub" id="brand-sub">—</span></div>
+    <div class="products" role="tablist" aria-label="Kumiho applications">
+      <button id="product-brain" class="active" onclick="showProduct('brain')">Brain</button>
+      <button id="product-miho" onclick="showProduct('miho')">9miho Canvas</button>
+    </div>
     <div class="stat">
       <span><span class="dot" id="dot-ce"></span> Server</span>
       <span><span class="dot" id="dot-brain"></span> Brain</span>
+      <span><span class="dot" id="dot-miho"></span> 9miho</span>
     </div>
     <div class="grow"></div>
     <button class="sm ghost" id="upd-btn" onclick="checkUpdate(true)">Check for updates</button>
-    <button class="sm" onclick="startBrain()">Restart Brain</button>
-    <button class="sm" onclick="loadBrain()">Reload</button>
+    <button class="sm" id="restart-product" onclick="restartActiveProduct()">Restart Brain</button>
+    <button class="sm" onclick="reloadActiveProduct()">Reload</button>
     <button class="icon" title="Settings" onclick="openSettings()">⚙</button>
   </header>
   <div class="stage">
-    <div class="empty" id="brain-empty">
+    <div class="empty product-pane active" id="brain-empty">
       <h3>Your living memory graph</h3>
       <p class="dim" style="margin:0">Start the Brain server to render it here.</p>
       <button class="primary" onclick="startBrain()">Start Brain</button>
     </div>
-    <iframe id="brain-frame" title="Kumiho Brain"></iframe>
+    <iframe class="product-pane active" id="brain-frame" title="Kumiho Brain"></iframe>
+    <div class="empty product-pane" id="miho-empty">
+      <div class="miho-mark">🦊</div>
+      <h3>9miho creative canvas</h3>
+      <p class="dim" id="miho-empty-copy" style="margin:0;max-width:500px">Install the bundled runtime, then create against your selected Kumiho connection.</p>
+      <button class="primary" id="miho-install-btn" onclick="installMiho()">Install 9miho</button>
+    </div>
+    <iframe class="product-pane" id="miho-frame" title="9miho Canvas"></iframe>
   </div>
 </div>
 
@@ -191,7 +210,6 @@
         <div class="row"><div class="grow"><span class="b">CE server</span> <span class="faint mono">127.0.0.1:9190</span> <span class="faint" id="ce-ver"></span></div><span class="pill" id="ce-pill">…</span></div>
         <div class="row"><button class="primary" onclick="ceRestart()">Restart</button><button onclick="cmd('ce_start','run')">Start</button><button onclick="cmd('ce_stop','run')">Stop</button></div>
         <div class="row" id="ce-update" style="font-size:12.5px"></div>
-        <p class="faint" style="font-size:12px;margin:12px 0 0">CE caps concurrent connections at <b>4</b> (compiled-in, single-user moat — not tunable). If memory calls stall while the port still listens, it is connection-starved; <b>Restart</b> clears it.</p>
       </div>
       <div class="card">
         <div class="row"><div class="grow"><span class="b">Databases</span> <span class="faint">Docker</span></div><span class="pill" id="docker-pill">…</span></div>
@@ -337,6 +355,18 @@
     try{ const ce=await invoke('ce_status'); $('dot-ce').className='dot '+(ce.reachable?'on':'off'); }catch(e){}
     try{ const b=await invoke('brain_status'); $('dot-brain').className='dot '+(b.reachable?'on':'off');
       $('brain-empty').classList.toggle('hide', b.reachable); }catch(e){}
+    try{ const m=await invoke('miho_status'); $('dot-miho').className='dot '+(m.reachable?'on':'off');
+      $('miho-empty').classList.toggle('hide', m.reachable);
+      const button=$('miho-install-btn'), copy=$('miho-empty-copy');
+      if(button){
+        button.style.display=m.reachable?'none':'inline-flex';
+        button.textContent=m.installed?(m.update_available?'Update & start 9miho':'Start 9miho'):'Install 9miho';
+        button.disabled=!m.bundled && !m.installed;
+      }
+      if(copy && !m.reachable) copy.textContent=!m.bundled && !m.installed
+        ? 'This development build has no bundled 9miho runtime. Use a signed Kumiho Desktop release.'
+        : (m.update_available?'A newer bundled 9miho is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the bundled runtime; no GitHub login or source toolchain is required.'));
+    }catch(e){}
   }
   const CE_LATEST_URL='https://api.github.com/repos/KumihoIO/kumiho-server-community/releases/latest';
   async function ceLatestVersion(){ try{ const r=await fetch(CE_LATEST_URL); if(!r.ok) return null;
@@ -433,6 +463,7 @@
       MODE='cloud'; $('brand-sub').textContent='Kumiho Cloud';
     }catch(e){}
     setLog('account','✓ saved — connecting to Kumiho Cloud…'); toast('✓ token saved');
+    await restartMihoIfRunning();
     await startBrain();
     refreshAccount(); }
 
@@ -459,6 +490,7 @@
       MODE='ce'; $('brand-sub').textContent='Community Edition · local';
     }catch(e){ setLog('account','token cleared, but saving the mode failed: '+String(e),true); return; }
     toast('✓ using Community Edition');
+    await restartMihoIfRunning();
     await startBrain();
     try{ const s=await invoke('ce_status');
       setLog('account', s.reachable
@@ -495,7 +527,59 @@
     $('up-cta').onclick=()=>openUrl(i.signup_url);
   }
 
-  // ---------- Brain (main view) ----------
+  // ---------- product shell: Brain + 9miho ----------
+  let ACTIVE_PRODUCT='brain';
+  function activateProductPane(name){
+    ACTIVE_PRODUCT=name;
+    localStorage.setItem('kumiho.activeProduct',name);
+    ['brain','miho'].forEach(product=>{
+      $('product-'+product).classList.toggle('active',product===name);
+      $(''+product+'-frame').classList.toggle('active',product===name);
+      $(''+product+'-empty').classList.toggle('active',product===name);
+    });
+    $('restart-product').textContent=name==='brain'?'Restart Brain':'Restart 9miho';
+  }
+  async function showProduct(name){
+    activateProductPane(name);
+    if(name==='brain') return;
+    let status; try{ status=await invoke('miho_status'); }catch(e){ toast(String(e),true); return; }
+    await refreshStatus();
+    if(status.reachable){ loadMiho(); return; }
+    if(status.installed && !status.update_available) await startMiho(false);
+  }
+  function reloadActiveProduct(){ ACTIVE_PRODUCT==='brain'?loadBrain():loadMiho(); }
+  function restartActiveProduct(){ ACTIVE_PRODUCT==='brain'?startBrain():startMiho(true); }
+
+  function loadMiho(){ $('miho-frame').src='http://127.0.0.1:9999/?t='+Date.now(); }
+  async function installMiho(){
+    const button=$('miho-install-btn'); if(button) button.disabled=true;
+    toast('installing 9miho…');
+    try{
+      const status=await invoke('miho_status');
+      if(!status.installed || status.update_available) await invoke('miho_install');
+      await startMiho(false);
+    }catch(e){ toast(String(e),true); }
+    finally { if(button) button.disabled=false; refreshStatus(); }
+  }
+  async function startMiho(force){
+    if(UPDATING) return;
+    if(force){ try{ await invoke('miho_stop'); }catch(e){} await new Promise(r=>setTimeout(r,350)); }
+    toast(force?'restarting 9miho…':'starting 9miho…');
+    try{ await invoke('miho_start'); }catch(e){ toast(String(e),true); return; }
+    const up=await waitFor(()=>invoke('miho_status').then(s=>s.reachable),40000);
+    if(up){ loadMiho(); $('miho-empty').classList.add('hide'); }
+    else toast('9miho did not start on 9999 — see ~/.kumiho/apps/9miho/logs/9miho.log',true);
+    refreshStatus();
+  }
+  async function restartMihoIfRunning(){
+    try{ const status=await invoke('miho_status'); if(!status.reachable) return;
+      await invoke('miho_stop'); await invoke('miho_start');
+      const up=await waitFor(()=>invoke('miho_status').then(s=>s.reachable),40000);
+      if(up && ACTIVE_PRODUCT==='miho') loadMiho();
+    }catch(e){ toast('9miho mode switch failed: '+String(e),true); }
+  }
+
+  // ---------- Brain ----------
   function loadBrain(){ $('brain-frame').src='http://127.0.0.1:8090/?t='+Date.now(); }
   async function startBrain(){
     if(UPDATING) return;   // don't respawn kumiho-brain into the installer's file swap
@@ -541,11 +625,14 @@
     } finally { BOOTING=false; }
   }
 
+  let STATUS_TIMER=null;
   function enterApp(){ closeSettings(); $('setup').classList.remove('show'); $('app').style.display='flex';
     $('brand-sub').textContent = MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
+    activateProductPane(localStorage.getItem('kumiho.activeProduct')==='miho'?'miho':'brain');
     refreshStatus();
     bootInfraThenBrain();   // optional CE infra autostart, then a fresh mode-correct Brain
-    setInterval(refreshStatus, 5000);
+    if(!STATUS_TIMER) STATUS_TIMER=setInterval(refreshStatus, 5000);
+    if(ACTIVE_PRODUCT==='miho') showProduct('miho');
   }
 
   // ---------- app auto-update (Tauri updater) ----------
