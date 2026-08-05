@@ -114,15 +114,27 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Read pinned 9miho release
+        id: miho
+        shell: bash
+        run: |
+          TAG=$(node -p "require('./src-tauri/9miho-version.json').release_tag")
+          VERSION=$(node -p "require('./src-tauri/9miho-version.json').version")
+          COMMIT=$(node -p "require('./src-tauri/9miho-version.json').commit")
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+
       - name: Download and stage the private 9miho prebuild
+        if: ${{ !startsWith(matrix.os, 'macos-') }}
         shell: bash
         env:
           # A fine-grained PAT or GitHub App token with read-only Contents access
           # to KumihoIO/9miho. It is used only in CI and never enters the bundle.
           GH_TOKEN: ${{ secrets.NINE_MIHO_RELEASE_TOKEN }}
         run: |
-          TAG=$(node -p "require('./src-tauri/9miho-version.json').release_tag")
-          VERSION=$(node -p "require('./src-tauri/9miho-version.json').version")
+          TAG="${{ steps.miho.outputs.tag }}"
+          VERSION="${{ steps.miho.outputs.version }}"
           ARCHIVE="9miho-${{ matrix.miho_platform }}-${{ matrix.miho_arch }}.zip"
           test -n "$GH_TOKEN" || (echo "NINE_MIHO_RELEASE_TOKEN is not configured" >&2; exit 1)
           mkdir -p 9miho-download 9miho-prebuilt src-tauri/binaries
@@ -138,6 +150,68 @@ jobs:
             chmod +x "src-tauri/binaries/9miho-${TRIPLE}"
           fi
           echo "staged 9miho $VERSION for $TRIPLE"
+
+      - name: Import Apple Developer ID (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        uses: Apple-Actions/import-codesign-certs@63fff01cd422d4b7b855d40ca1e9d34d2de9427d # v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Checkout pinned private 9miho source (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: KumihoIO/9miho
+          ref: ${{ steps.miho.outputs.tag }}
+          token: ${{ secrets.NINE_MIHO_RELEASE_TOKEN }}
+          path: 9miho-source
+          persist-credentials: false
+
+      - name: uv for signed 9miho build (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+
+      - name: pnpm for signed 9miho build (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Node for signed 9miho build (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: 9miho-source/pnpm-lock.yaml
+
+      - name: Build and stage same-Team 9miho sidecar (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          MIHO_VERSION: ${{ steps.miho.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_SIGNING_IDENTITY" || (echo "APPLE_SIGNING_IDENTITY is not configured" >&2; exit 1)
+          test "$(git -C 9miho-source rev-parse HEAD)" = "${{ steps.miho.outputs.commit }}" || \
+            (echo "pinned 9miho tag does not resolve to the expected commit" >&2; exit 1)
+          cd 9miho-source
+          uv sync --frozen
+          pnpm install --frozen-lockfile
+          pnpm build
+          uv run --with pyinstaller==6.21.0 python scripts/build_prebuilt.py \
+            --version "$MIHO_VERSION" \
+            --codesign-identity "$APPLE_SIGNING_IDENTITY"
+          output/prebuild/stage/9miho --version | grep -Fx "9miho $MIHO_VERSION"
+          cd ..
+          TRIPLE=$(rustc -vV | sed -n 's/host: //p')
+          mkdir -p src-tauri/binaries
+          cp 9miho-source/output/prebuild/stage/9miho "src-tauri/binaries/9miho-${TRIPLE}"
+          chmod +x "src-tauri/binaries/9miho-${TRIPLE}"
+          codesign --verify --strict --verbose=2 "src-tauri/binaries/9miho-${TRIPLE}"
+          echo "staged same-Team 9miho $MIHO_VERSION for $TRIPLE"
 
       - name: Restore App Store Connect API key (macOS notarization)
         if: startsWith(matrix.os, 'macos-')
@@ -157,10 +231,9 @@ jobs:
           # that the in-app auto-updater verifies against the embedded public key.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Apple signing + notarization — macOS runner only. Left empty on the
-          # Linux/Windows jobs so tauri never attempts a keychain import there.
-          APPLE_CERTIFICATE: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          # Apple signing + notarization — macOS runner only.
+          # The certificate is imported once above so both PyInstaller and
+          # Tauri use the same keychain identity and Team ID.
           APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_SIGNING_IDENTITY || '' }}
           APPLE_API_ISSUER: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_API_ISSUER || '' }}
           APPLE_API_KEY: ${{ startsWith(matrix.os, 'macos-') && secrets.APPLE_API_KEY || '' }}
@@ -172,3 +245,29 @@ jobs:
           # Add the sidecar only for the release build so local `cargo tauri dev`
           # (which has no staged sidecar) keeps working.
           args: '${{ matrix.bundle_args }} --config {"bundle":{"externalBin":["binaries/kumiho-brain","binaries/9miho"]}}'
+
+      - name: Verify signed 9miho sidecar (macOS)
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find "src-tauri/target/release/bundle/macos" -name '*.app' -type d -print -quit)
+          test -n "$APP" || (echo "Kumiho Desktop app bundle was not found" >&2; exit 1)
+          SIDECAR="$APP/Contents/MacOS/9miho"
+          test -n "$SIDECAR" || (echo "signed 9miho sidecar was not found" >&2; exit 1)
+          test -x "$SIDECAR" || (echo "signed 9miho sidecar is not executable" >&2; exit 1)
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign --verify --strict --verbose=2 "$SIDECAR"
+          APP_TEAM=$(codesign -dv --verbose=4 "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+          SIDECAR_TEAM=$(codesign -dv --verbose=4 "$SIDECAR" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+          test -n "$APP_TEAM" || (echo "app has no TeamIdentifier" >&2; exit 1)
+          test "$APP_TEAM" = "$SIDECAR_TEAM" || (echo "Team ID mismatch: app=$APP_TEAM sidecar=$SIDECAR_TEAM" >&2; exit 1)
+          codesign --display --entitlements :- "$APP" > app-entitlements.plist 2>/dev/null
+          if test -s app-entitlements.plist; then
+            plutil -lint app-entitlements.plist
+            if plutil -extract com.apple.security.cs.disable-library-validation raw app-entitlements.plist >/dev/null 2>&1; then
+              echo "Library Validation must remain enabled" >&2
+              exit 1
+            fi
+          fi
+          "$SIDECAR" --version | grep -Fx "9miho ${{ steps.miho.outputs.version }}"
