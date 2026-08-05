@@ -151,6 +151,14 @@ The workflow reads the pinned private build from
 read-only Contents access to `KumihoIO/9miho`. The token is used only by Actions
 to download the private release archive; it is never shipped to users.
 
+On macOS, the release job checks out the pinned private 9miho tag, verifies that
+it resolves to the recorded merge commit, and gives its PyInstaller build the
+same Developer ID used for Kumiho Desktop. This signs the one-file launcher and
+its embedded Python framework with the same Team ID as the host app while
+keeping macOS Library Validation enabled. The workflow compares the final app
+and sidecar Team IDs and executes the sidecar from inside the `.app` bundle
+before publishing.
+
 ## Links
 
 - [kumiho.io](https://kumiho.io) — product, pricing, docs
