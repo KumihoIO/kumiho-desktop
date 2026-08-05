@@ -5,10 +5,10 @@
 # Own [workspace] so it stays independent of the root kumiho-brain crate.
 [package]
 name = "kumiho-desktop"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.77"
-description = "Kumiho Desktop — control center for Kumiho Memory (CE/Cloud, plugins, Brain view)"
+description = "Kumiho Desktop — control center for Kumiho Memory, 9miho, and CE/Cloud connections"
 license = "MIT"
 
 [build-dependencies]
