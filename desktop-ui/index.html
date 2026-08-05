@@ -73,7 +73,7 @@
 
   /* settings tabs */
   .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:14px 0 0;}
-  .tab{padding:9px 14px;border-radius:8px 8px 0 0;color:var(--dim);cursor:pointer;font-size:13.5px;font-weight:600;border-bottom:2px solid transparent;margin-bottom:-1px;}
+  .tab{height:auto;padding:9px 14px;border:0;border-radius:8px 8px 0 0;background:transparent;color:var(--dim);cursor:pointer;font-size:13.5px;font-weight:600;border-bottom:2px solid transparent;margin-bottom:-1px;}
   .tab:hover{color:var(--text);} .tab.active{color:#fff;border-bottom-color:var(--fox);}
   .spanel{display:none;padding-top:20px;} .spanel.active{display:block;} .spanel .psub{color:var(--dim);margin:0 0 16px;font-size:13px;}
   .mode-toolbar{display:grid;grid-template-columns:minmax(240px,1fr) auto;gap:16px;align-items:end;margin-bottom:16px;}
@@ -207,15 +207,15 @@
   <div class="modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="settings-head">
       <div class="mhead"><div class="grow"><div class="kicker">Kumiho Desktop</div><h2 id="settings-title" style="margin:2px 0 0">Settings</h2></div><button class="icon ghost" aria-label="Close settings" onclick="closeSettings()">✕</button></div>
-      <div class="tabs" role="tablist" aria-label="Settings sections">
-        <div class="tab" role="tab" data-st="general" onclick="stab('general')">General</div>
-        <div class="tab" role="tab" data-st="apps" onclick="stab('apps')">Apps</div>
-        <div class="tab" role="tab" data-st="agents" onclick="stab('agents')">Agents</div>
-        <div class="tab" role="tab" data-st="plan" onclick="stab('plan')">Plan</div>
+      <div class="tabs" role="tablist" aria-label="Settings sections" onkeydown="settingsTabKey(event)">
+        <button type="button" class="tab" role="tab" id="settings-tab-general" aria-controls="s-general" data-st="general" onclick="stab('general')">General</button>
+        <button type="button" class="tab" role="tab" id="settings-tab-apps" aria-controls="s-apps" data-st="apps" onclick="stab('apps')">Apps</button>
+        <button type="button" class="tab" role="tab" id="settings-tab-agents" aria-controls="s-agents" data-st="agents" onclick="stab('agents')">Agents</button>
+        <button type="button" class="tab" role="tab" id="settings-tab-plan" aria-controls="s-plan" data-st="plan" onclick="stab('plan')">Plan</button>
       </div>
     </div>
     <div class="settings-body">
-      <section class="spanel" id="s-general" role="tabpanel">
+      <section class="spanel" id="s-general" role="tabpanel" aria-labelledby="settings-tab-general">
         <div class="mode-toolbar">
           <label class="field"><span class="lab">Kumiho connection</span><select id="settings-mode" onchange="changeSettingsMode(this.value)"><option value="ce">Community Edition (local)</option><option value="cloud">Kumiho Cloud</option></select></label>
           <span class="unsaved" id="settings-unsaved">Unsaved changes</span>
@@ -261,7 +261,7 @@
         <div class="settings-save row"><span class="grow dim" id="settings-save-copy">Changes apply only after you save.</span><button onclick="reloadSettingsDraft()">Discard</button><button class="primary" id="settings-save" onclick="applySettings()">Save changes</button></div>
       </section>
 
-      <section class="spanel" id="s-apps" role="tabpanel">
+      <section class="spanel" id="s-apps" role="tabpanel" aria-labelledby="settings-tab-apps">
         <p class="psub">Manage each Kumiho application from one place. App controls no longer cover your workspace.</p>
         <div class="app-grid">
           <div class="card app-card">
@@ -285,12 +285,12 @@
         <div class="log" id="log-apps"></div>
       </section>
 
-      <section class="spanel" id="s-agents" role="tabpanel">
+      <section class="spanel" id="s-agents" role="tabpanel" aria-labelledby="settings-tab-agents">
         <p class="psub">Install Kumiho Memory into your agents. Detected on this machine:</p>
         <div id="hosts"></div><div class="log" id="log-connect"></div>
       </section>
 
-      <section class="spanel" id="s-plan" role="tabpanel">
+      <section class="spanel" id="s-plan" role="tabpanel" aria-labelledby="settings-tab-plan">
         <p class="psub" id="up-tag">Run free and private. Move to hosted when your team needs it.</p>
         <div class="cmp" id="cmp"></div>
         <div style="overflow-x:auto"><table id="tiers"></table></div>
@@ -402,9 +402,15 @@
   }
   document.getElementById('settings').addEventListener('click',(e)=>{ if(e.target.id==='settings') closeSettings(); });
   const stabs=()=>document.querySelectorAll('.tab');
-  function stab(t){ stabs().forEach(x=>{ const active=x.dataset.st===t; x.classList.toggle('active',active); x.setAttribute('aria-selected',String(active)); });
+  function stab(t,focus=false){ stabs().forEach(x=>{ const active=x.dataset.st===t; x.classList.toggle('active',active); x.setAttribute('aria-selected',String(active)); x.tabIndex=active?0:-1; if(active&&focus)x.focus(); });
     document.querySelectorAll('.spanel').forEach(p=>p.classList.toggle('active',p.id==='s-'+t));
     if(t==='general') renderSettingsMode(); if(t==='apps') refreshApps(); if(t==='agents') loadHosts(); if(t==='plan') loadUpgrade(); }
+  function settingsTabKey(event){
+    const tabs=[...stabs()], current=tabs.indexOf(document.activeElement); if(current<0)return;
+    let next=null; if(event.key==='ArrowRight')next=(current+1)%tabs.length; if(event.key==='ArrowLeft')next=(current-1+tabs.length)%tabs.length;
+    if(event.key==='Home')next=0; if(event.key==='End')next=tabs.length-1; if(next===null)return;
+    event.preventDefault(); stab(tabs[next].dataset.st,true);
+  }
 
   function setSettingsDirty(dirty=true){ SETTINGS_DIRTY=dirty; $('settings-unsaved').classList.toggle('show',dirty); $('settings-save').disabled=!dirty||APPLYING_SETTINGS; }
   function readSettingsDraft(){
@@ -442,26 +448,48 @@
     const logId=draft.mode==='ce'?'general':'account';
     if(draft.mode==='ce' && (![draft.server_port,draft.neo4j_port,draft.redis_port].every(validPort))){ setLog(logId,'Ports must be whole numbers from 1 to 65535.',true); return; }
     APPLYING_SETTINGS=true; $('settings-save').disabled=true; $('settings-save').textContent='Saving…';
+    let previousConfig=null, previousLogin=false, previousToken=null, persistenceStarted=false;
     try{
+      previousConfig=await invoke('desktop_config_get');
+      previousLogin=await invoke('autostart_get');
+      previousToken=await invoke('account_token');
       if(draft.mode==='cloud'){
-        const token=$('a-token').value.trim();
-        if(token){
-          const probe=await cloudProbe(token);
+        const enteredToken=$('a-token').value.trim();
+        const token=enteredToken||await invoke('account_token');
+        if(!token) throw new Error('Add a Kumiho Cloud service token before saving Cloud mode.');
+        const probe=await cloudProbe(token);
+        if(!probe.ok){
           if(probe.status===401||probe.status===403) throw new Error('Kumiho Cloud rejected that token (HTTP '+probe.status+').');
-          await invoke('account_set_token',{token});
+          throw new Error('Could not verify the Kumiho Cloud token'+(probe.status?' (HTTP '+probe.status+')':': '+(probe.error||'service unavailable'))+'. Try again before switching modes.');
         }
-        const account=await invoke('account_status');
-        if(!account.has_token) throw new Error('Add a Kumiho Cloud service token before saving Cloud mode.');
+        persistenceStarted=true;
+        if(enteredToken) await invoke('account_set_token',{token:enteredToken});
       }
+      persistenceStarted=true;
       await invoke('desktop_config_set',{cfg:{...draft,configured:true}});
       await invoke('autostart_set',{enabled:SETTINGS_LOGIN_DRAFT});
       MODE=draft.mode; $('brand-sub').textContent=MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
       $('a-token').value=''; setSettingsDirty(false); setLog(logId,'✓ Settings saved. Reconnecting applications…');
-      await restartMihoIfRunning();
-      await startBrain();
-      setLog(logId,'✓ Settings saved and applications reconnected.'); toast('✓ settings saved');
+      const mihoReconnected=await restartMihoIfRunning();
+      const memoryReconnected=await startBrain();
+      if(mihoReconnected&&memoryReconnected){
+        setLog(logId,'✓ Settings saved and applications reconnected.'); toast('✓ settings saved');
+      }else{
+        const failed=[!memoryReconnected&&'Memory',!mihoReconnected&&'9miho'].filter(Boolean).join(' and ');
+        setLog(logId,'Settings saved, but '+failed+' could not reconnect. Use Settings > Apps to retry.',true);
+        toast('Settings saved; '+failed+' needs attention',true);
+      }
       refreshStatus(); refreshApps();
-    }catch(e){ setLog(logId,String(e),true); toast(String(e),true); setSettingsDirty(true); }
+    }catch(e){
+      const rollbackErrors=[];
+      if(persistenceStarted){
+        try{ if(previousConfig)await invoke('desktop_config_set',{cfg:previousConfig}); }catch(rollback){ rollbackErrors.push('config: '+String(rollback)); }
+        try{ await invoke('autostart_set',{enabled:previousLogin}); }catch(rollback){ rollbackErrors.push('startup: '+String(rollback)); }
+        try{ if(previousToken)await invoke('account_set_token',{token:previousToken}); else await invoke('account_clear_token'); }catch(rollback){ rollbackErrors.push('token: '+String(rollback)); }
+      }
+      const message=String(e)+(rollbackErrors.length?' Rollback needs attention ('+rollbackErrors.join('; ')+').':'');
+      setLog(logId,message,true); toast(message,true); setSettingsDirty(true);
+    }
     finally{ APPLYING_SETTINGS=false; $('settings-save').textContent='Save changes'; $('settings-save').disabled=!SETTINGS_DIRTY; }
   }
 
@@ -475,10 +503,11 @@
   async function refreshStatus(){
     if(STATUS_REFRESH_IN_FLIGHT) return STATUS_REFRESH_IN_FLIGHT;
     STATUS_REFRESH_IN_FLIGHT=(async()=>{
+    let mihoStatus=null;
     try{ const ce=await invoke('ce_status'); $('dot-ce').className='dot '+(ce.reachable?'on':'off'); }catch(e){}
     try{ const b=await invoke('brain_status'); $('dot-brain').className='dot '+(b.reachable?'on':'off');
       $('brain-empty').classList.toggle('hide', b.reachable); }catch(e){}
-    try{ const m=await invoke('miho_status');
+    try{ const m=await invoke('miho_status'); mihoStatus=m;
       if(m.reachable){ MIHO_CONFIRMED_REACHABLE=true; MIHO_HEALTH_MISSES=0; }
       else if(MIHO_CONFIRMED_REACHABLE) MIHO_HEALTH_MISSES++;
       const visiblyReachable=m.reachable || (MIHO_CONFIRMED_REACHABLE && MIHO_HEALTH_MISSES<3);
@@ -495,7 +524,7 @@
         ? 'This development build has no bundled 9miho runtime. Use a signed Kumiho Desktop release.'
         : (m.update_available?'A newer bundled 9miho is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the bundled runtime; no GitHub login or source toolchain is required.'));
     }catch(e){}
-    if($('s-apps').classList.contains('active')) refreshApps();
+    if($('s-apps').classList.contains('active')) await refreshApps(mihoStatus);
     })();
     try{ return await STATUS_REFRESH_IN_FLIGHT; }
     finally{ STATUS_REFRESH_IN_FLIGHT=null; }
@@ -645,24 +674,27 @@
     refreshStatus();
   }
   async function restartMihoIfRunning(){
-    try{ const status=await invoke('miho_status'); if(!status.reachable) return;
+    try{ const status=await invoke('miho_status'); if(!status.reachable) return true;
       await invoke('miho_stop'); await invoke('miho_start');
       const up=await waitFor(()=>invoke('miho_status').then(s=>s.reachable),40000);
       if(up && ACTIVE_PRODUCT==='miho') loadMiho();
-    }catch(e){ toast('9miho mode switch failed: '+String(e),true); }
+      if(!up) toast('9miho mode switch failed: runtime did not answer on 9999',true);
+      return up;
+    }catch(e){ toast('9miho mode switch failed: '+String(e),true); return false; }
   }
 
   // ---------- Memory ----------
   function loadBrain(){ $('brain-frame').src='http://127.0.0.1:8090/?t='+Date.now(); }
   async function startBrain(){
-    if(UPDATING) return;   // don't respawn Memory into the installer's file swap
+    if(UPDATING) return false;   // don't respawn Memory into the installer's file swap
     toast('restarting Memory…');
     try{ await invoke('brain_stop'); }catch(e){}
     await new Promise(r=>setTimeout(r,500));
-    try{ await invoke('brain_start'); }catch(e){ toast(String(e),true); }
+    try{ await invoke('brain_start'); }catch(e){ toast(String(e),true); return false; }
     const up=await waitFor(()=>invoke('brain_status').then(s=>s.reachable), 20000);
     if(up){ loadBrain(); $('brain-empty').classList.add('hide'); } else { toast('Memory did not start on 8090',true); }
     refreshStatus();
+    return up;
   }
 
   // Bound a promise so a hung CLI (e.g. `docker start` against a daemon still
@@ -717,6 +749,10 @@
       b.textContent='Update to v'+ver; b.className='primary'; b.onclick=doUpdate;
       if(status){ status.textContent='update available'; status.className='pill accent'; }
       if(copy) copy.textContent='Signed Desktop v'+ver+' is ready to install. The app restarts automatically.';
+    } else if(mode==='error') {
+      b.textContent='Retry update check'; b.className=''; b.onclick=()=>checkUpdate(true);
+      if(status){ status.textContent='check failed'; status.className='pill off'; }
+      if(copy) copy.textContent='Could not check signed Desktop releases. Check your connection and retry.';
     } else {
       b.textContent='Check update'; b.className=''; b.onclick=()=>checkUpdate(true);
       if(status){ status.textContent='up to date'; status.className='pill on'; }
@@ -729,7 +765,7 @@
       APP_VERSION=u.current||APP_VERSION; if($('desktop-version')) $('desktop-version').textContent='Version '+APP_VERSION;
       if(u.available){ setUpdBtn('available',u.version); if(manual) toast('Update v'+u.version+' available'); }
       else { setUpdBtn('idle'); if(manual) toast('You’re on the latest (v'+u.current+')'); }
-    }catch(e){ setUpdBtn('idle'); if(manual) toast('Update check failed: '+String(e),true); }
+    }catch(e){ setUpdBtn('error'); if(manual) toast('Update check failed: '+String(e),true); }
   }
   async function doUpdate(){ if(UPDATING) return; UPDATING=true;
     const b=$('upd-btn'); if(b){ b.textContent='Updating…'; b.className='sm'; b.onclick=null; }
@@ -740,14 +776,14 @@
       startBrain(); }   // Memory may have been killed just before a failed swap — bring it back
   }
 
-  async function refreshApps(){
+  async function refreshApps(mihoStatus=null){
     if($('desktop-version')) $('desktop-version').textContent='Version '+APP_VERSION;
     try{
       const memory=await invoke('brain_status');
       pill($('memory-app-pill'),memory.reachable,memory.reachable?'running':'stopped');
     }catch(e){ pill($('memory-app-pill'),false,'unavailable'); }
     try{
-      const miho=await invoke('miho_status');
+      const miho=mihoStatus||await invoke('miho_status');
       pill($('miho-app-pill'),miho.reachable,miho.reachable?'running':(miho.installed?'stopped':'not installed'));
       $('miho-version').textContent=miho.version?'Version '+miho.version:'Not installed';
       $('miho-version-detail').textContent='Installed '+(miho.version||'—')+' · Bundled '+(miho.bundled_version||'—')+' · 127.0.0.1:'+miho.port;

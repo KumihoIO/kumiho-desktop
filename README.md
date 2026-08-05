@@ -13,8 +13,8 @@ stack one front door:
 | **See** | Your living memory graph, GPU-rendered — memories bloom into the orb the moment any client writes them. This is the main view. |
 | **Run** | Install, start, stop and health-check the local **Community Edition** server, plus its Neo4j/Redis containers. Tells you when a newer CE is out and updates it in one click. |
 | **Connect** | The exact commands to install Kumiho Memory into Claude Code, ChatGPT/Codex, and friends — copy, paste, done. |
-| **Account** | Your Kumiho Cloud token, stored in the OS keychain (Keychain / Credential Manager / libsecret) — never a plaintext file. **Save & connect** switches this app to Cloud; **Clear & use CE** brings it back to your local server. |
-| **Upgrade** | Community Edition vs Kumiho Cloud, side by side, when you outgrow one machine. |
+| **General** | Choose Community Edition or Kumiho Cloud, edit only that mode's settings, then **Save changes** to apply. Cloud tokens stay in the OS keychain (Keychain / Credential Manager / libsecret), never a plaintext file. |
+| **Plan** | Community Edition vs Kumiho Cloud, side by side, when you outgrow one machine. |
 
 ---
 
@@ -30,7 +30,7 @@ Grab the installer for your platform from
 | macOS (Apple Silicon) | `.dmg` |
 
 The installer bundles the graph renderer and a platform-native **9miho** runtime
-as sidecars. The Desktop app can install and run the 9miho Canvas without source
+as sidecars. The Desktop app can install and run 9miho without source
 access, Python, Node, or a GitHub login.
 
 > On Windows the build isn't code-signed yet, so SmartScreen may say
@@ -40,9 +40,8 @@ access, Python, Node, or a GitHub login.
 ### Staying up to date
 
 After the first install, Kumiho Desktop **updates itself**. It checks quietly on
-launch and shows an **Update** button in the header when a new signed release is
-out — one click downloads, installs, and relaunches. No coming back here for
-links.
+launch and shows the available signed release in **Settings → Apps** — one click
+downloads, installs, and relaunches. No coming back here for links.
 
 Auto-update covers **macOS** (Apple Silicon), the **Windows** `.exe` installer,
 and the Linux **AppImage**. The `.deb`/`.rpm` packages and Intel Macs update by
@@ -59,9 +58,10 @@ A setup wizard asks one question — **where should your memory live?**
 - **Kumiho Cloud** — managed. Paste a service token (kept in your OS keychain)
   and you're connected.
 
-You can switch anytime from **Settings → Account**: paste a token and
-**Save & connect** for Cloud, or **Clear & use CE** to return to your local
-server. **Settings → Upgrade** compares the two side by side.
+You can switch anytime from **Settings → General**. Choose Community Edition or
+Kumiho Cloud in the connection menu, review the mode-specific fields, and click
+**Save changes** to apply them. Merely changing the menu does not reconnect
+anything. **Settings → Plan** compares the two modes side by side.
 
 ### Requirements
 
@@ -72,11 +72,7 @@ server. **Settings → Upgrade** compares the two side by side.
 - **Kumiho Cloud** — an account at [kumiho.io](https://kumiho.io) and a service
   token.
 
-> Community Edition binds loopback only and is single-user by design: the server
-> caps concurrent connections (compiled in). If memory calls stall while the port
-> still listens, it is connection-starved — **Settings → Run → Restart** clears it.
-
-## The Brain view
+## Memory
 
 Not a chart of your memory — your memory, rendered.
 
@@ -93,9 +89,10 @@ Not a chart of your memory — your memory, rendered.
 Drag to orbit · scroll to zoom · click to inspect · `/` to search · `V` to switch
 between one sphere and a constellation of spaces.
 
-## 9miho Canvas
+## 9miho
 
-Choose **9miho Canvas** in the Desktop header, then click **Install 9miho**. The
+Choose **9miho** in the **Memory | 9miho** navigation, then install it from the
+empty state or **Settings → Apps**. The
 signed prebuild is copied into `~/.kumiho/apps/9miho`, launched on loopback port
 `9999`, and displayed inside the Tauri shell. It uses the same explicit
 Community Edition or Kumiho Cloud selection as the rest of Desktop; switching
