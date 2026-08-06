@@ -82,6 +82,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Desktop shell regression checks
+        shell: bash
+        run: |
+          node scripts/test-active-server-health.cjs
+          node scripts/test-html5-file-drop.cjs
+
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
