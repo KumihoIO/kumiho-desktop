@@ -87,6 +87,7 @@ jobs:
         run: |
           node scripts/test-active-server-health.cjs
           node scripts/test-html5-file-drop.cjs
+          node scripts/test-9miho-update.cjs
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -99,6 +100,9 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
             libdbus-1-dev pkg-config   # keyring sync-secret-service → dbus-secret-service
+
+      - name: 9miho updater unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked miho
 
       - name: Build kumiho-brain and stage it as a sidecar
         shell: bash

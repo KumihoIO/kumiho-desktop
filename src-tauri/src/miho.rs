@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -51,13 +52,31 @@ fn installed_binary() -> Option<std::path::PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-fn installed_version() -> Option<String> {
-    let text = fs::read_to_string(install_root()?.join("manifest.json")).ok()?;
+fn installed_version_at(root: &Path) -> Option<String> {
+    let text = fs::read_to_string(root.join("manifest.json")).ok()?;
     serde_json::from_str::<serde_json::Value>(&text)
         .ok()?
         .get("version")?
         .as_str()
         .map(str::to_owned)
+}
+
+fn installed_version() -> Option<String> {
+    installed_version_at(&install_root()?)
+}
+
+fn write_install_manifest(root: &Path) -> Result<(), String> {
+    fs::write(root.join("manifest.json"), BUNDLED_BUILD).map_err(|e| e.to_string())
+}
+
+fn newer_version_available(installed: &str, bundled: &str) -> bool {
+    match (
+        semver::Version::parse(installed),
+        semver::Version::parse(bundled),
+    ) {
+        (Ok(installed), Ok(bundled)) => bundled > installed,
+        _ => installed != bundled,
+    }
 }
 
 fn health_ok() -> bool {
@@ -124,7 +143,12 @@ fn health_response_ok(response: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::health_response_ok;
+    use super::{
+        build_info, health_response_ok, installed_version_at, newer_version_available,
+        write_install_manifest,
+    };
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn accepts_complete_health_response_without_waiting_for_eof() {
@@ -141,6 +165,31 @@ mod tests {
         assert!(!health_response_ok(
             b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 20\r\n\r\n{\"status\":\"starting\"}"
         ));
+    }
+
+    #[test]
+    fn only_offers_a_newer_bundled_9miho_version() {
+        assert!(newer_version_available("0.1.3", "0.3.0"));
+        assert!(!newer_version_available("0.3.0", "0.3.0"));
+        assert!(!newer_version_available("0.4.0", "0.3.0"));
+    }
+
+    #[test]
+    fn installed_manifest_reports_the_version_after_an_update() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kumiho-desktop-miho-manifest-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create test install root");
+
+        write_install_manifest(&root).expect("write installed manifest");
+        assert_eq!(installed_version_at(&root), Some(build_info().version));
+
+        fs::remove_dir_all(root).expect("remove test install root");
     }
 }
 
@@ -164,7 +213,9 @@ pub fn miho_status() -> MihoStatus {
         port: MIHO_PORT,
         bundled: bundled_binary().is_some(),
         installed: installed_binary().is_some(),
-        update_available: version.as_deref().is_some_and(|v| v != bundled_version),
+        update_available: version
+            .as_deref()
+            .is_some_and(|v| newer_version_available(v, &bundled_version)),
         version,
         bundled_version,
     }
@@ -193,7 +244,7 @@ pub fn miho_install(state: State<AppState>) -> Result<String, String> {
         permissions.set_mode(0o755);
         fs::set_permissions(&destination, permissions).map_err(|e| e.to_string())?;
     }
-    fs::write(root.join("manifest.json"), BUNDLED_BUILD).map_err(|e| e.to_string())?;
+    write_install_manifest(&root)?;
     Ok(format!("9miho {} installed", build_info().version))
 }
 

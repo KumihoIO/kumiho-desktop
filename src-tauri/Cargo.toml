@@ -5,7 +5,7 @@
 # Own [workspace] so it stays independent of the root kumiho-brain crate.
 [package]
 name = "kumiho-desktop"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 rust-version = "1.77"
 description = "Kumiho Desktop — control center for Kumiho Memory, 9miho, and CE/Cloud connections"
@@ -21,6 +21,7 @@ tauri-plugin-single-instance = "2"  # collapse a duplicate launch (updater relau
 tauri-plugin-autostart = "2"        # "launch at login" (Run key / LaunchAgent / .desktop)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 dirs = "5"      # locate ~/.kumiho for the Run pillar
 ureq = "2"      # Account: probe the cloud control plane natively — a webview
                 # fetch to control.kumiho.cloud is CORS-blocked (no ACAO header)
