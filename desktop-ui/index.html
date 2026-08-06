@@ -279,7 +279,7 @@
             <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">9miho</div><div class="faint" id="miho-version">Version —</div></div><span class="pill" id="miho-app-pill">…</span></div>
             <div class="app-meta" id="miho-version-detail">Runtime · 127.0.0.1:9999</div>
             <div class="app-update-copy" id="miho-update-copy">Checking bundled runtime…</div>
-            <div class="app-actions"><button class="primary" id="miho-app-install" onclick="reinstallMiho()">Reinstall</button><button onclick="startMiho(true)">Restart</button><button onclick="loadMiho()">Reload view</button></div>
+            <div class="app-actions"><button class="primary" id="miho-app-install" onclick="installOrUpdateMiho()">Reinstall</button><button onclick="startMiho(true)">Restart</button><button onclick="loadMiho()">Reload view</button></div>
           </div>
         </div>
         <div class="log" id="log-apps"></div>
@@ -719,7 +719,7 @@
     }catch(e){ toast(String(e),true); }
     finally { if(button) button.disabled=false; refreshStatus(); }
   }
-  async function reinstallMiho(){
+  async function installOrUpdateMiho(){
     const button=$('miho-app-install'); if(button) button.disabled=true;
     let status=null;
     try{ status=await invoke('miho_status'); }catch(e){}
@@ -729,20 +729,24 @@
     setLog('apps',status?.update_available?'installing the bundled 9miho update…':'installing the bundled 9miho runtime…');
     try{
       await invoke('miho_install');
-      await startMiho(false);
-      setLog('apps','✓ 9miho installed and started.');
-    }catch(e){ setLog('apps',String(e),true); toast(String(e),true); }
-    finally{ if(button) button.disabled=false; await refreshApps(); }
+      if(!await startMiho(false)) throw new Error('9miho was installed but did not restart');
+      const installed=await invoke('miho_status');
+      const action=status?.update_available?'updated':(status?.installed?'reinstalled':'installed');
+      setLog('apps','✓ 9miho '+(installed.version||installed.bundled_version||'')+' '+action+' and started.');
+      await refreshApps(installed);
+    }catch(e){ setLog('apps',String(e),true); toast(String(e),true); await refreshApps(); }
+    finally{ if(button) button.disabled=false; }
   }
   async function startMiho(force){
-    if(UPDATING) return;
+    if(UPDATING) return false;
     if(force){ try{ await invoke('miho_stop'); }catch(e){} await new Promise(r=>setTimeout(r,350)); }
     toast(force?'restarting 9miho…':'starting 9miho…');
-    try{ await invoke('miho_start'); }catch(e){ toast(String(e),true); return; }
+    try{ await invoke('miho_start'); }catch(e){ toast(String(e),true); return false; }
     const up=await waitFor(()=>invoke('miho_status').then(s=>s.reachable),40000);
     if(up){ MIHO_CONFIRMED_REACHABLE=true; MIHO_HEALTH_MISSES=0; loadMiho(); $('miho-empty').classList.add('hide'); }
     else toast('9miho did not start on 9999 — see ~/.kumiho/apps/9miho/logs/9miho.log',true);
     refreshStatus();
+    return up;
   }
   async function restartMihoIfRunning(){
     try{ const status=await invoke('miho_status'); if(!status.reachable) return true;
@@ -827,7 +831,7 @@
     } else {
       b.textContent='Check update'; b.className=''; b.onclick=()=>checkUpdate(true);
       if(status){ status.textContent='up to date'; status.className='pill on'; }
-      if(copy) copy.textContent='Desktop updates include the compatible Memory runtime.';
+      if(copy) copy.textContent='Desktop updates include compatible Memory and signed 9miho runtimes.';
     }
   }
   async function checkUpdate(manual){
