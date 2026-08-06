@@ -178,7 +178,7 @@
       <button id="product-miho" role="tab" aria-selected="false" onclick="showProduct('miho')">9miho</button>
     </div>
     <div class="stat">
-      <span><span class="dot" id="dot-ce"></span> Server</span>
+      <span><span class="dot" id="dot-server"></span> Server</span>
       <span><span class="dot" id="dot-brain"></span> Memory</span>
       <span><span class="dot" id="dot-miho"></span> 9miho</span>
     </div>
@@ -302,6 +302,7 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="./server-health.js"></script>
 <script>
   const T = window.__TAURI__;
   const invoke = (c,a) => T.core.invoke(c,a);
@@ -468,7 +469,7 @@
       persistenceStarted=true;
       await invoke('desktop_config_set',{cfg:{...draft,configured:true}});
       await invoke('autostart_set',{enabled:SETTINGS_LOGIN_DRAFT});
-      MODE=draft.mode; $('brand-sub').textContent=MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
+      MODE=draft.mode; invalidateServerHealth(); $('brand-sub').textContent=MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
       $('a-token').value=''; setSettingsDirty(false); setLog(logId,'✓ Settings saved. Reconnecting applications…');
       const mihoReconnected=await restartMihoIfRunning();
       const memoryReconnected=await startBrain();
@@ -487,6 +488,7 @@
         try{ await invoke('autostart_set',{enabled:previousLogin}); }catch(rollback){ rollbackErrors.push('startup: '+String(rollback)); }
         try{ if(previousToken)await invoke('account_set_token',{token:previousToken}); else await invoke('account_clear_token'); }catch(rollback){ rollbackErrors.push('token: '+String(rollback)); }
       }
+      invalidateServerHealth();
       const message=String(e)+(rollbackErrors.length?' Rollback needs attention ('+rollbackErrors.join('; ')+').':'');
       setLog(logId,message,true); toast(message,true); setSettingsDirty(true);
     }
@@ -498,36 +500,105 @@
   // ---------- status ----------
   function pill(el,on,txt){ if(!el)return; el.textContent=txt||(on?'reachable':'unreachable'); el.className='pill '+(on?'on':'off'); }
   let STATUS_REFRESH_IN_FLIGHT=null;
+  let STATUS_REFRESH_PENDING=false;
+  const CLOUD_HEALTH_TTL_MS=30000;
+  let SERVER_HEALTH_CACHE={mode:null,checkedAt:0,reachable:false,reason:null};
+  let SERVER_HEALTH_GENERATION=0;
   let MIHO_CONFIRMED_REACHABLE=false;
   let MIHO_HEALTH_MISSES=0;
-  async function refreshStatus(){
-    if(STATUS_REFRESH_IN_FLIGHT) return STATUS_REFRESH_IN_FLIGHT;
-    STATUS_REFRESH_IN_FLIGHT=(async()=>{
-    let mihoStatus=null;
-    try{ const ce=await invoke('ce_status'); $('dot-ce').className='dot '+(ce.reachable?'on':'off'); }catch(e){}
-    try{ const b=await invoke('brain_status'); $('dot-brain').className='dot '+(b.reachable?'on':'off');
-      $('brain-empty').classList.toggle('hide', b.reachable); }catch(e){}
-    try{ const m=await invoke('miho_status'); mihoStatus=m;
-      if(m.reachable){ MIHO_CONFIRMED_REACHABLE=true; MIHO_HEALTH_MISSES=0; }
-      else if(MIHO_CONFIRMED_REACHABLE) MIHO_HEALTH_MISSES++;
-      const visiblyReachable=m.reachable || (MIHO_CONFIRMED_REACHABLE && MIHO_HEALTH_MISSES<3);
-      if(!visiblyReachable && MIHO_HEALTH_MISSES>=3) MIHO_CONFIRMED_REACHABLE=false;
-      $('dot-miho').className='dot '+(visiblyReachable?'on':'off');
-      $('miho-empty').classList.toggle('hide', visiblyReachable);
-      const button=$('miho-install-btn'), copy=$('miho-empty-copy');
-      if(button){
-        button.style.display=visiblyReachable?'none':'inline-flex';
-        button.textContent=m.installed?(m.update_available?'Update & start 9miho':'Start 9miho'):'Install 9miho';
-        button.disabled=!m.bundled && !m.installed;
+  function invalidateServerHealth(){
+    SERVER_HEALTH_GENERATION++;
+    SERVER_HEALTH_CACHE={mode:null,checkedAt:0,reachable:false,reason:null};
+    // Keep the full status refresh serialized. If one is already running,
+    // refreshStatus() queues exactly one follow-up using the new generation.
+    if(STATUS_REFRESH_IN_FLIGHT) STATUS_REFRESH_PENDING=true;
+  }
+  async function readActiveServerHealth(){
+    const mode=MODE;
+    const generation=SERVER_HEALTH_GENERATION;
+    let ceReachable=false, cloudReachable=false;
+    let reason=null;
+    if(mode === 'cloud'){
+      const now=Date.now();
+      if(SERVER_HEALTH_CACHE.mode==='cloud' && now-SERVER_HEALTH_CACHE.checkedAt<CLOUD_HEALTH_TTL_MS){
+        return {mode,generation,reachable:SERVER_HEALTH_CACHE.reachable,reason:SERVER_HEALTH_CACHE.reason};
       }
-      if(copy && !visiblyReachable) copy.textContent=!m.bundled && !m.installed
-        ? 'This development build has no bundled 9miho runtime. Use a signed Kumiho Desktop release.'
-        : (m.update_available?'A newer bundled 9miho is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the bundled runtime; no GitHub login or source toolchain is required.'));
+      const token=await invoke('account_token');
+      if(!token) reason='missing-token';
+      else{
+        const probe=await cloudProbe(token);
+        cloudReachable=!!probe.ok;
+        if(!cloudReachable) reason=probe.status===401||probe.status===403?'rejected-token':'unreachable';
+      }
+    }else{
+      ceReachable=!!(await invoke('ce_status')).reachable;
+      if(!ceReachable) reason='stopped';
+    }
+    const reachable=KumihoDesktopStatus.activeServerReachable(mode,ceReachable,cloudReachable);
+    if(KumihoDesktopStatus.healthRequestIsCurrent(mode,generation,MODE,SERVER_HEALTH_GENERATION)){
+      SERVER_HEALTH_CACHE={mode,checkedAt:Date.now(),reachable,reason};
+    }
+    return {mode,generation,reachable,reason};
+  }
+  async function refreshStatus(){
+    if(STATUS_REFRESH_IN_FLIGHT){ STATUS_REFRESH_PENDING=true; return STATUS_REFRESH_IN_FLIGHT; }
+    STATUS_REFRESH_PENDING=false;
+    const refreshGeneration=SERVER_HEALTH_GENERATION;
+    const refreshIsCurrent=()=>refreshGeneration===SERVER_HEALTH_GENERATION;
+    const refreshPromise=(async()=>{
+    let mihoStatus=null;
+    const serverMode=MODE;
+    const serverGeneration=SERVER_HEALTH_GENERATION;
+    try{
+      const health=await readActiveServerHealth();
+      if(KumihoDesktopStatus.healthRequestIsCurrent(health.mode,health.generation,MODE,SERVER_HEALTH_GENERATION)){
+        const dot=$('dot-server');
+        dot.className='dot '+(health.reachable?'on':'off');
+        dot.title=KumihoDesktopStatus.serverHealthTitle(health.mode,health.reachable,health.reason);
+      }
+    }catch(e){
+      if(serverMode===MODE && serverGeneration===SERVER_HEALTH_GENERATION){
+        const dot=$('dot-server');
+        dot.className='dot off';
+        dot.title=KumihoDesktopStatus.serverHealthTitle(serverMode,false,'check-failed');
+      }
+    }
+    try{ const b=await invoke('brain_status');
+      if(refreshIsCurrent()){
+        $('dot-brain').className='dot '+(b.reachable?'on':'off');
+        $('brain-empty').classList.toggle('hide', b.reachable);
+      }
     }catch(e){}
-    if($('s-apps').classList.contains('active')) await refreshApps(mihoStatus);
+    try{ const m=await invoke('miho_status');
+      if(refreshIsCurrent()){
+        mihoStatus=m;
+        if(m.reachable){ MIHO_CONFIRMED_REACHABLE=true; MIHO_HEALTH_MISSES=0; }
+        else if(MIHO_CONFIRMED_REACHABLE) MIHO_HEALTH_MISSES++;
+        const visiblyReachable=m.reachable || (MIHO_CONFIRMED_REACHABLE && MIHO_HEALTH_MISSES<3);
+        if(!visiblyReachable && MIHO_HEALTH_MISSES>=3) MIHO_CONFIRMED_REACHABLE=false;
+        $('dot-miho').className='dot '+(visiblyReachable?'on':'off');
+        $('miho-empty').classList.toggle('hide', visiblyReachable);
+        const button=$('miho-install-btn'), copy=$('miho-empty-copy');
+        if(button){
+          button.style.display=visiblyReachable?'none':'inline-flex';
+          button.textContent=m.installed?(m.update_available?'Update & start 9miho':'Start 9miho'):'Install 9miho';
+          button.disabled=!m.bundled && !m.installed;
+        }
+        if(copy && !visiblyReachable) copy.textContent=!m.bundled && !m.installed
+          ? 'This development build has no bundled 9miho runtime. Use a signed Kumiho Desktop release.'
+          : (m.update_available?'A newer bundled 9miho is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the bundled runtime; no GitHub login or source toolchain is required.'));
+      }
+    }catch(e){}
+    if(refreshIsCurrent() && $('s-apps').classList.contains('active')) await refreshApps(mihoStatus,refreshGeneration);
     })();
-    try{ return await STATUS_REFRESH_IN_FLIGHT; }
-    finally{ STATUS_REFRESH_IN_FLIGHT=null; }
+    STATUS_REFRESH_IN_FLIGHT=refreshPromise;
+    try{ return await refreshPromise; }
+    finally{
+      if(STATUS_REFRESH_IN_FLIGHT===refreshPromise){
+        STATUS_REFRESH_IN_FLIGHT=null;
+        if(STATUS_REFRESH_PENDING){ STATUS_REFRESH_PENDING=false; queueMicrotask(()=>refreshStatus()); }
+      }
+    }
   }
   const CE_LATEST_URL='https://api.github.com/repos/KumihoIO/kumiho-server-community/releases/latest';
   async function ceLatestVersion(){ try{ const r=await fetch(CE_LATEST_URL); if(!r.ok) return null;
@@ -542,7 +613,7 @@
 
   async function refreshRun(){
     try{ const ce=await invoke('ce_status'); pill($('ce-pill'),ce.reachable, ce.reachable?('v'+(ce.version||'?')):(ce.installed?'stopped':'not installed'));
-      $('dot-ce').className='dot '+(ce.reachable?'on':'off'); $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
+      $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
       const box=$('ce-update');
       if(box){ const latest=await ceLatestVersion();
         if(!latest) box.innerHTML='';
@@ -776,14 +847,16 @@
       startBrain(); }   // Memory may have been killed just before a failed swap — bring it back
   }
 
-  async function refreshApps(mihoStatus=null){
+  async function refreshApps(mihoStatus=null,expectedGeneration=null){
+    const isCurrent=()=>expectedGeneration===null || expectedGeneration===SERVER_HEALTH_GENERATION;
     if($('desktop-version')) $('desktop-version').textContent='Version '+APP_VERSION;
     try{
       const memory=await invoke('brain_status');
-      pill($('memory-app-pill'),memory.reachable,memory.reachable?'running':'stopped');
-    }catch(e){ pill($('memory-app-pill'),false,'unavailable'); }
+      if(isCurrent()) pill($('memory-app-pill'),memory.reachable,memory.reachable?'running':'stopped');
+    }catch(e){ if(isCurrent()) pill($('memory-app-pill'),false,'unavailable'); }
     try{
       const miho=mihoStatus||await invoke('miho_status');
+      if(!isCurrent()) return;
       pill($('miho-app-pill'),miho.reachable,miho.reachable?'running':(miho.installed?'stopped':'not installed'));
       $('miho-version').textContent=miho.version?'Version '+miho.version:'Not installed';
       $('miho-version-detail').textContent='Installed '+(miho.version||'—')+' · Bundled '+(miho.bundled_version||'—')+' · 127.0.0.1:'+miho.port;
@@ -793,7 +866,7 @@
       const button=$('miho-app-install');
       button.textContent=!miho.installed?'Install':(miho.update_available?'Update':'Reinstall');
       button.disabled=!miho.bundled;
-    }catch(e){ pill($('miho-app-pill'),false,'unavailable'); setLog('apps',String(e),true); }
+    }catch(e){ if(isCurrent()){ pill($('miho-app-pill'),false,'unavailable'); setLog('apps',String(e),true); } }
   }
 
   // boot
