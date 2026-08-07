@@ -79,7 +79,7 @@
   .mode-toolbar{display:grid;grid-template-columns:minmax(240px,1fr) auto;gap:16px;align-items:end;margin-bottom:16px;}
   .mode-panel{display:none}.mode-panel.active{display:block}.settings-save{position:sticky;bottom:-28px;margin:18px -28px -28px;padding:14px 28px;background:linear-gradient(to top,#0c0c0e 78%,rgba(12,12,14,.86));border-top:1px solid var(--line);z-index:3;}
   .unsaved{display:none;color:var(--warn);font-size:12px}.unsaved.show{display:inline-flex;align-items:center;gap:6px}.unsaved:before{content:'';width:7px;height:7px;border-radius:50%;background:var(--warn)}
-  .app-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.app-card{display:flex;flex-direction:column;min-height:245px}.app-card .app-icon{width:44px;height:44px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid var(--line);display:grid;place-items:center;overflow:hidden}.app-card .app-icon img{width:100%;height:100%;object-fit:contain;padding:4px}.app-card .app-icon.wordmark img{width:86%;height:auto;padding:0}.app-meta{font:11px/1.5 var(--mono);color:var(--faint);margin:12px 0 16px}.app-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:auto}.app-actions button{flex:1;min-width:84px}.app-update-copy{font-size:12px;color:var(--dim);min-height:38px;margin-top:8px}
+  .app-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.app-card{display:flex;flex-direction:column;min-height:245px}.app-card .app-icon{width:44px;height:44px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid var(--line);display:grid;place-items:center;overflow:hidden}.app-card .app-icon img{width:100%;height:100%;object-fit:contain;padding:4px}.app-card .app-icon.wordmark img{width:86%;height:auto;padding:0}.app-meta{font:11px/1.5 var(--mono);color:var(--faint);margin:12px 0 16px}.app-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:auto}.app-actions button{flex:1;min-width:84px}.app-update-copy{font-size:12px;color:var(--dim);min-height:38px;margin-top:8px}
 
   /* app shell: Memory is the main view */
   #app{display:none;flex-direction:column;height:100vh;}
@@ -270,23 +270,29 @@
             <div class="app-actions"><button id="upd-btn" onclick="checkUpdate(true)">Check update</button></div>
           </div>
           <div class="card app-card">
-            <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">Memory</div><div class="faint">Bundled with Desktop</div></div><span class="pill" id="memory-app-pill">…</span></div>
-            <div class="app-meta">View · 127.0.0.1:8090<br>Connection · follows General</div>
-            <div class="app-update-copy">Memory updates with Kumiho Desktop so its runtime and UI stay compatible.</div>
-            <div class="app-actions"><button class="primary" onclick="startBrain()">Restart</button><button onclick="loadBrain()">Reload view</button></div>
+            <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">Kumiho Memory</div><div class="faint" id="memory-plugin-version">Engine · PyPI</div></div><span class="pill" id="memory-plugin-pill">…</span></div>
+            <div class="app-meta" id="memory-plugin-detail">Host-owned Python environments · —</div>
+            <div class="app-update-copy" id="memory-update-copy">Check the canonical kumiho-memory PyPI release.</div>
+            <div class="app-actions"><button id="memory-check-btn" onclick="checkMemoryUpdates(true)">Check update</button><button class="primary" id="memory-update-btn" onclick="updateMemory()" style="display:none">Update</button><button onclick="stab('agents')">Manage agents</button></div>
           </div>
           <div class="card app-card">
             <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">9miho</div><div class="faint" id="miho-version">Version —</div></div><span class="pill" id="miho-app-pill">…</span></div>
             <div class="app-meta" id="miho-version-detail">Runtime · 127.0.0.1:9999</div>
-            <div class="app-update-copy" id="miho-update-copy">Checking bundled runtime…</div>
-            <div class="app-actions"><button class="primary" id="miho-app-install" onclick="installOrUpdateMiho()">Reinstall</button><button onclick="startMiho(true)">Restart</button><button onclick="loadMiho()">Reload view</button></div>
+            <div class="app-update-copy" id="miho-update-copy">Check signed 9miho runtime releases.</div>
+            <div class="app-actions"><button id="miho-check-btn" onclick="checkMihoUpdate(true)">Check update</button><button class="primary" id="miho-app-install" onclick="installOrUpdateMiho()">Reinstall</button><button onclick="startMiho(true)">Restart</button><button onclick="loadMiho()">Reload view</button></div>
+          </div>
+          <div class="card app-card">
+            <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">Memory View</div><div class="faint">Bundled with Desktop</div></div><span class="pill" id="memory-app-pill">…</span></div>
+            <div class="app-meta">View · 127.0.0.1:8090<br>Connection · follows General</div>
+            <div class="app-update-copy">The graph viewer updates with Kumiho Desktop for runtime compatibility.</div>
+            <div class="app-actions"><button class="primary" onclick="startBrain()">Restart</button><button onclick="loadBrain()">Reload view</button></div>
           </div>
         </div>
         <div class="log" id="log-apps"></div>
       </section>
 
       <section class="spanel" id="s-agents" role="tabpanel" aria-labelledby="settings-tab-agents">
-        <p class="psub">Install Kumiho Memory into your agents. Detected on this machine:</p>
+        <div class="row"><p class="psub grow">Install and update Kumiho Memory in each detected agent host.</p><button class="sm" onclick="loadHosts(true)">Check all updates</button></div>
         <div id="hosts"></div><div class="log" id="log-connect"></div>
       </section>
 
@@ -581,12 +587,12 @@
         const button=$('miho-install-btn'), copy=$('miho-empty-copy');
         if(button){
           button.style.display=visiblyReachable?'none':'inline-flex';
-          button.textContent=m.installed?(m.update_available?'Update & start 9miho':'Start 9miho'):'Install 9miho';
-          button.disabled=!m.bundled && !m.installed;
+          button.textContent=m.installed?((m.update_available||MIHO_UPDATE?.update_available)?'Update & start 9miho':'Start 9miho'):'Install 9miho';
+          button.disabled=!m.bundled && !m.installed && !MIHO_UPDATE?.update_available;
         }
         if(copy && !visiblyReachable) copy.textContent=!m.bundled && !m.installed
           ? 'This development build has no bundled 9miho runtime. Use a signed Kumiho Desktop release.'
-          : (m.update_available?'A newer bundled 9miho is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the bundled runtime; no GitHub login or source toolchain is required.'));
+          : ((m.update_available||MIHO_UPDATE?.update_available)?'A newer 9miho release is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the runtime; no GitHub login or source toolchain is required.'));
       }
     }catch(e){}
     if(refreshIsCurrent() && $('s-apps').classList.contains('active')) await refreshApps(mihoStatus,refreshGeneration);
@@ -665,17 +671,31 @@
   const HOST_CMDS={
     claude:['claude plugin marketplace add KumihoIO/kumiho-plugins','claude plugin install kumiho-memory@kumiho-plugins'],
     codex:['codex plugin marketplace add KumihoIO/kumiho-plugins','codex plugin add kumiho-memory@kumiho-plugins'],
-    openclaw:[]
+    openclaw:['openclaw plugins install @kumiho/openclaw-kumiho']
   };
-  async function loadHosts(){ const w=$('hosts'); w.innerHTML='';
-    let hosts=[]; try{ hosts=await invoke('connect_hosts'); }catch(e){ setLog('connect',String(e),true); return; }
+  async function loadHosts(checkLatest=false){ const w=$('hosts'); w.innerHTML='';
+    if(checkLatest) setLog('connect','checking official plugin releases…');
+    let hosts=[]; try{ hosts=await invoke(checkLatest?'connect_check_updates':'connect_hosts'); }catch(e){ setLog('connect',String(e),true); return; }
     for(const h of hosts){ const cmds=HOST_CMDS[h.id]||[]; const c=document.createElement('div'); c.className='card';
-      c.innerHTML=`<div class="row"><div class="grow b">${h.name}</div><span class="pill ${h.installed?'on':'off'}">${h.installed?'detected':'not found'}</span></div>`
+      const state=!h.installed?'host not found':(h.update_available?'update available':(h.plugin_installed?('v'+h.version):'plugin not installed'));
+      const stateClass=h.update_available?'accent':(h.plugin_installed?'on':'off');
+      c.innerHTML=`<div class="row"><div class="grow b">${h.name}</div><span class="pill ${stateClass}">${state}</span></div>`
+        + `<div class="app-meta">Installed · ${h.version||'—'}${h.latest_version?`<br>Latest · ${h.latest_version}`:''}</div>`
         + (cmds.length
             ? `<p class="dim" style="font-size:12.5px;margin:10px 0 0">Run these in your terminal:</p>` + cmds.map(chip).join('')
             : `<p class="dim" style="font-size:12.5px;margin:10px 0 0">See the install guide for this host.</p>`)
-        + `<div class="row" style="margin-top:10px"><button class="sm" onclick="openUrl('${PLUGIN_DOCS}')">Open install guide →</button></div>`;
+        + `<div class="row" style="margin-top:10px">${h.installed?`<button class="sm ${h.update_available?'primary':''}" onclick="${h.plugin_installed?'updateHost':'installHost'}('${h.id}')">${h.plugin_installed?'Update':'Install'}</button>`:''}<button class="sm" onclick="openUrl('${PLUGIN_DOCS}')">Open guide →</button></div>`;
       w.appendChild(c); }
+    if(checkLatest) setLog('connect','✓ plugin versions checked');
+    return hosts;
+  }
+  async function installHost(host){ setLog('connect','installing Kumiho Memory for '+host+'…');
+    try{ const r=await invoke('connect_install',{host}); setLog('connect','✓ '+(r||'installed')+' · restart the host to activate'); await loadHosts(true); }
+    catch(e){ setLog('connect',String(e),true); }
+  }
+  async function updateHost(host){ setLog('connect','updating Kumiho Memory for '+host+'…');
+    try{ const r=await invoke('connect_update',{host}); setLog('connect','✓ '+(r||'updated')+' · restart the host to activate'); await loadHosts(true); }
+    catch(e){ setLog('connect',String(e),true); }
   }
 
   async function loadUpgrade(){ let i; try{ i=await invoke('upgrade_status'); }catch(e){ return; }
@@ -690,6 +710,9 @@
 
   // ---------- product shell: Memory + 9miho ----------
   let ACTIVE_PRODUCT='brain';
+  let MIHO_UPDATE=null;
+  let MIHO_CHECK_ERROR=null;
+  let MEMORY_STATUS=null;
   function activateProductPane(name){
     ACTIVE_PRODUCT=name;
     localStorage.setItem('kumiho.activeProduct',name);
@@ -706,15 +729,55 @@
     let status; try{ status=await invoke('miho_status'); }catch(e){ toast(String(e),true); return; }
     await refreshStatus();
     if(status.reachable){ loadMiho(); return; }
-    if(status.installed && !status.update_available) await startMiho(false);
+    if(status.installed && !status.update_available && !MIHO_UPDATE?.update_available) await startMiho(false);
   }
   function loadMiho(){ $('miho-frame').src='http://127.0.0.1:9999/?t='+Date.now(); }
+  function renderMihoUpdate(miho){
+    if(!miho) return;
+    const onlineAvailable=!!MIHO_UPDATE?.update_available;
+    const available=onlineAvailable||miho.update_available;
+    const latest=MIHO_UPDATE?.latest_version||miho.bundled_version||'—';
+    $('miho-version-detail').textContent='Installed '+(miho.version||'—')+' · Latest '+latest+' · Bundled '+(miho.bundled_version||'—')+' · 127.0.0.1:'+miho.port;
+    const copy=$('miho-update-copy'), check=$('miho-check-btn'), install=$('miho-app-install');
+    if(MIHO_CHECK_ERROR){
+      copy.textContent='Online check failed. The signed bundled runtime remains available.';
+      check.textContent='Retry check';
+    }else if(MIHO_UPDATE){
+      copy.textContent=onlineAvailable
+        ? 'Signed 9miho '+MIHO_UPDATE.latest_version+' is ready to download and install.'
+        : '9miho is up to date (latest '+MIHO_UPDATE.latest_version+').';
+      check.textContent='Check update';
+    }else{
+      copy.textContent=miho.update_available
+        ? 'Bundled '+miho.bundled_version+' is ready. Check online for a newer release.'
+        : 'Check the signed 9miho runtime feed for new releases.';
+      check.textContent='Check update';
+    }
+    install.textContent=!miho.installed?'Install':(available?'Update':'Reinstall');
+    install.disabled=!onlineAvailable&&!miho.bundled;
+  }
+  async function checkMihoUpdate(manual){
+    const button=$('miho-check-btn'); if(button) button.textContent='Checking…';
+    try{
+      MIHO_UPDATE=await invoke('miho_check_update'); MIHO_CHECK_ERROR=null;
+      const miho=await invoke('miho_status'); renderMihoUpdate(miho);
+      if(manual) toast(MIHO_UPDATE.update_available?'9miho '+MIHO_UPDATE.latest_version+' is available':'9miho is up to date');
+      return MIHO_UPDATE;
+    }catch(e){
+      MIHO_UPDATE=null; MIHO_CHECK_ERROR=String(e);
+      try{ renderMihoUpdate(await invoke('miho_status')); }catch(_){}
+      if(manual) toast('9miho update check failed: '+String(e),true);
+      return null;
+    }
+  }
   async function installMiho(){
     const button=$('miho-install-btn'); if(button) button.disabled=true;
     toast('installing 9miho…');
     try{
       const status=await invoke('miho_status');
-      if(!status.installed || status.update_available) await invoke('miho_install');
+      if(!MIHO_UPDATE) await checkMihoUpdate(false);
+      if(MIHO_UPDATE?.update_available) await invoke('miho_update');
+      else if(!status.installed || status.update_available) await invoke('miho_install');
       await startMiho(false);
     }catch(e){ toast(String(e),true); }
     finally { if(button) button.disabled=false; refreshStatus(); }
@@ -723,16 +786,19 @@
     const button=$('miho-app-install'); if(button) button.disabled=true;
     let status=null;
     try{ status=await invoke('miho_status'); }catch(e){}
-    if(status?.installed && !status.update_available && !window.confirm('Reinstall the current 9miho runtime? Your projects and assets are kept.')){
+    if(!MIHO_UPDATE) await checkMihoUpdate(false);
+    const onlineUpdate=!!MIHO_UPDATE?.update_available;
+    if(status?.installed && !status.update_available && !onlineUpdate && !window.confirm('Reinstall the current 9miho runtime? Your projects and assets are kept.')){
       if(button) button.disabled=false; return;
     }
-    setLog('apps',status?.update_available?'installing the bundled 9miho update…':'installing the bundled 9miho runtime…');
+    setLog('apps',onlineUpdate?'downloading and verifying the signed 9miho update…':(status?.update_available?'installing the bundled 9miho update…':'installing the bundled 9miho runtime…'));
     try{
-      await invoke('miho_install');
+      if(onlineUpdate) await invoke('miho_update'); else await invoke('miho_install');
       if(!await startMiho(false)) throw new Error('9miho was installed but did not restart');
       const installed=await invoke('miho_status');
-      const action=status?.update_available?'updated':(status?.installed?'reinstalled':'installed');
+      const action=onlineUpdate||status?.update_available?'updated':(status?.installed?'reinstalled':'installed');
       setLog('apps','✓ 9miho '+(installed.version||installed.bundled_version||'')+' '+action+' and started.');
+      await checkMihoUpdate(false);
       await refreshApps(installed);
     }catch(e){ setLog('apps',String(e),true); toast(String(e),true); await refreshApps(); }
     finally{ if(button) button.disabled=false; }
@@ -851,6 +917,57 @@
       startBrain(); }   // Memory may have been killed just before a failed swap — bring it back
   }
 
+  function renderMemoryStatus(status,checked=false){
+    MEMORY_STATUS=status||{environments:[],latest_version:null,update_available:false};
+    const environments=MEMORY_STATUS.environments||[];
+    const detail=$('memory-plugin-detail');
+    if(detail) detail.innerHTML=environments.length
+      ? environments.map(e=>`${e.name} · Memory v${e.version}${e.sdk_version?(' · SDK v'+e.sdk_version):''}`).join('<br>')
+      : 'No host-owned Kumiho Memory Python environment found.';
+    const pillEl=$('memory-plugin-pill');
+    if(pillEl){
+      pillEl.textContent=MEMORY_STATUS.update_available?'update available':(environments.length?(checked?'up to date':'installed'):'not installed');
+      pillEl.className='pill '+(MEMORY_STATUS.update_available?'accent':(environments.length?'on':'off'));
+    }
+    const versions=[...new Set(environments.map(e=>e.version).filter(Boolean))];
+    $('memory-plugin-version').textContent=versions.length===1?'Engine '+versions[0]+' · PyPI':(environments.length?(environments.length+' environments · PyPI'):'Engine · PyPI');
+    const copy=$('memory-update-copy');
+    if(copy) copy.textContent=MEMORY_STATUS.update_available
+      ? 'PyPI kumiho-memory '+MEMORY_STATUS.latest_version+' is ready for '+environments.filter(e=>e.version!==MEMORY_STATUS.latest_version).map(e=>e.name).join(', ')+'.'
+      : (environments.length?(checked?('Engine is up to date on PyPI'+(MEMORY_STATUS.latest_version?' (v'+MEMORY_STATUS.latest_version+')':'')+'.'):'Check the canonical kumiho-memory PyPI release.'):'Install an agent adapter first to provision its Memory engine.');
+    const update=$('memory-update-btn'); if(update) update.style.display=MEMORY_STATUS.update_available?'inline-flex':'none';
+    const check=$('memory-check-btn'); if(check) check.textContent='Check update';
+  }
+  async function checkMemoryUpdates(manual){
+    const button=$('memory-check-btn'); if(button) button.textContent='Checking…';
+    try{
+      const status=await invoke('memory_check_update'); renderMemoryStatus(status,true);
+      if(manual) toast(status.update_available?('Kumiho Memory '+status.latest_version+' is available'):'Kumiho Memory is up to date');
+      return status;
+    }catch(e){
+      if(button) button.textContent='Retry check';
+      if(manual) toast('Memory update check failed: '+String(e),true);
+      return null;
+    }
+  }
+  async function updateMemory(){
+    if(!MEMORY_STATUS?.update_available) await checkMemoryUpdates(false);
+    if(!MEMORY_STATUS?.update_available){ toast('Kumiho Memory is already up to date'); return; }
+    const button=$('memory-update-btn'); if(button) button.disabled=true;
+    setLog('apps','updating host-owned kumiho-memory environments from PyPI…');
+    try{
+      const result=await invoke('memory_update'); renderMemoryStatus(result.status,true);
+      if(result.errors.length||result.status.update_available){
+        setLog('apps',(result.errors||[]).join(' · ')||'One or more environments still report an older version.',true);
+        toast('Some Memory environments did not update',true);
+      }else{
+        setLog('apps','✓ Kumiho Memory updated in '+result.updated.join(', ')+'. Restart each agent host to activate it.');
+        toast('Kumiho Memory updated');
+      }
+    }catch(e){ setLog('apps',String(e),true); toast('Memory update failed: '+String(e),true); }
+    if(button) button.disabled=false;
+  }
+
   async function refreshApps(mihoStatus=null,expectedGeneration=null){
     const isCurrent=()=>expectedGeneration===null || expectedGeneration===SERVER_HEALTH_GENERATION;
     if($('desktop-version')) $('desktop-version').textContent='Version '+APP_VERSION;
@@ -859,17 +976,15 @@
       if(isCurrent()) pill($('memory-app-pill'),memory.reachable,memory.reachable?'running':'stopped');
     }catch(e){ if(isCurrent()) pill($('memory-app-pill'),false,'unavailable'); }
     try{
+      const memoryEngine=await invoke('memory_status');
+      if(isCurrent()) renderMemoryStatus(memoryEngine,false);
+    }catch(e){ if(isCurrent()) pill($('memory-plugin-pill'),false,'unavailable'); }
+    try{
       const miho=mihoStatus||await invoke('miho_status');
       if(!isCurrent()) return;
       pill($('miho-app-pill'),miho.reachable,miho.reachable?'running':(miho.installed?'stopped':'not installed'));
       $('miho-version').textContent=miho.version?'Version '+miho.version:'Not installed';
-      $('miho-version-detail').textContent='Installed '+(miho.version||'—')+' · Bundled '+(miho.bundled_version||'—')+' · 127.0.0.1:'+miho.port;
-      $('miho-update-copy').textContent=!miho.bundled
-        ? 'No bundled runtime is present in this development build.'
-        : (miho.update_available?'Bundled '+miho.bundled_version+' is ready to install.':(miho.installed?'The installed runtime matches this Desktop release.':'Install the bundled runtime without a source toolchain.'));
-      const button=$('miho-app-install');
-      button.textContent=!miho.installed?'Install':(miho.update_available?'Update':'Reinstall');
-      button.disabled=!miho.bundled;
+      renderMihoUpdate(miho);
     }catch(e){ if(isCurrent()){ pill($('miho-app-pill'),false,'unavailable'); setLog('apps',String(e),true); } }
   }
 
@@ -881,6 +996,8 @@
     MODE=cfg.mode||'ce';
     if(cfg.configured){ enterApp(); } else { $('setup').classList.add('show'); }
     checkUpdate(false);   // silent check; surfaces an Update button if one's out
+    checkMihoUpdate(false);
+    checkMemoryUpdates(false);
   });
 </script>
 </body>

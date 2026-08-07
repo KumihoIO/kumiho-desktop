@@ -10,6 +10,7 @@ mod account;
 mod config;
 mod connect;
 mod docker;
+mod memory;
 mod miho;
 mod run;
 mod startup;
@@ -58,9 +59,15 @@ fn main() {
             run::brain_status,
             run::brain_start,
             run::brain_stop,
+            // Kumiho Memory engine — host-owned Python venvs + PyPI updates
+            memory::memory_status,
+            memory::memory_check_update,
+            memory::memory_update,
             // 9miho — bundled install + explicit CE/Cloud launch
             miho::miho_status,
+            miho::miho_check_update,
             miho::miho_install,
+            miho::miho_update,
             miho::miho_start,
             miho::miho_stop,
             // Docker — Neo4j + Redis dependencies
@@ -75,7 +82,9 @@ fn main() {
             account::cloud_probe,
             // Connect — per-host plugin install
             connect::connect_hosts,
+            connect::connect_check_updates,
             connect::connect_install,
+            connect::connect_update,
             // Upgrade — CE vs Cloud
             upgrade::upgrade_status,
             // Update — in-app auto-update

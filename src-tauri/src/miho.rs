@@ -7,9 +7,12 @@
 use crate::config::desktop_config_get;
 use crate::util::{command, kumiho_home};
 use crate::AppState;
+use minisign_verify::{PublicKey, Signature};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Cursor, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::Stdio;
@@ -19,10 +22,37 @@ use tauri::{Manager, State};
 
 const MIHO_PORT: u16 = 9999;
 const BUNDLED_BUILD: &str = include_str!("../9miho-version.json");
+const UPDATE_FEED_URL: &str =
+    "https://github.com/KumihoIO/9miho-release/releases/latest/download/latest.json";
+// 9miho component-only Minisign key. The private source repository signs each
+// archive before publishing it to the public binary-only release repository.
+const UPDATE_PUBLIC_KEY: &str = "RWQVYAIfinTi8U4QHo9OKjUXrg/VcKAMm9McT7PFNhjwUHwy5TUKLFys";
+const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct BuildInfo {
     version: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct RuntimeRelease {
+    url: String,
+    signature: String,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+struct RuntimeFeed {
+    version: String,
+    platforms: HashMap<String, RuntimeRelease>,
+}
+
+#[derive(Deserialize)]
+struct RuntimeArchiveManifest {
+    version: String,
+    platform: String,
+    arch: String,
+    api_port: u16,
 }
 
 fn build_info() -> BuildInfo {
@@ -35,6 +65,96 @@ fn binary_name() -> &'static str {
     } else {
         "9miho"
     }
+}
+
+fn runtime_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+fn runtime_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    }
+}
+
+fn runtime_target() -> String {
+    format!("{}-{}", runtime_platform(), runtime_arch())
+}
+
+fn parse_update_feed(text: &str) -> Result<(String, RuntimeRelease), String> {
+    let feed: RuntimeFeed =
+        serde_json::from_str(text).map_err(|e| format!("invalid 9miho update feed: {e}"))?;
+    semver::Version::parse(&feed.version)
+        .map_err(|e| format!("invalid 9miho release version: {e}"))?;
+    let target = runtime_target();
+    let release = feed
+        .platforms
+        .get(&target)
+        .cloned()
+        .ok_or_else(|| format!("9miho {target} update is not published yet"))?;
+    if !release
+        .url
+        .starts_with("https://github.com/KumihoIO/9miho-release/releases/")
+    {
+        return Err("9miho update URL is not an official Kumiho runtime release".into());
+    }
+    if release.sha256.len() != 64 || !release.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("9miho update feed contains an invalid SHA-256".into());
+    }
+    if !release.signature.starts_with("untrusted comment:") {
+        return Err("9miho update feed contains a non-Minisign signature".into());
+    }
+    Ok((feed.version, release))
+}
+
+fn fetch_update_feed() -> Result<(String, RuntimeRelease), String> {
+    let response = ureq::get(UPDATE_FEED_URL)
+        .set("Cache-Control", "no-cache")
+        .timeout(Duration::from_secs(10))
+        .call()
+        .map_err(|e| format!("could not check 9miho updates: {e}"))?;
+    let text = response
+        .into_string()
+        .map_err(|e| format!("could not read 9miho update feed: {e}"))?;
+    parse_update_feed(&text)
+}
+
+fn download_release(release: &RuntimeRelease) -> Result<Vec<u8>, String> {
+    let response = ureq::get(&release.url)
+        .timeout(Duration::from_secs(120))
+        .call()
+        .map_err(|e| format!("could not download 9miho update: {e}"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_UPDATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("could not read 9miho update: {e}"))?;
+    if bytes.len() as u64 > MAX_UPDATE_BYTES {
+        return Err("9miho update archive is unexpectedly large".into());
+    }
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if !actual.eq_ignore_ascii_case(&release.sha256) {
+        return Err(format!(
+            "9miho update checksum mismatch (got {actual}, expected {})",
+            release.sha256
+        ));
+    }
+    let key = PublicKey::from_base64(UPDATE_PUBLIC_KEY)
+        .map_err(|e| format!("invalid embedded updater public key: {e}"))?;
+    let signature = Signature::decode(&release.signature)
+        .map_err(|e| format!("invalid 9miho update signature: {e}"))?;
+    key.verify(&bytes, &signature, false)
+        .map_err(|e| format!("9miho update signature verification failed: {e}"))?;
+    Ok(bytes)
 }
 
 fn bundled_binary() -> Option<std::path::PathBuf> {
@@ -67,6 +187,94 @@ fn installed_version() -> Option<String> {
 
 fn write_install_manifest(root: &Path) -> Result<(), String> {
     fs::write(root.join("manifest.json"), BUNDLED_BUILD).map_err(|e| e.to_string())
+}
+
+fn unpack_runtime(
+    archive_bytes: Vec<u8>,
+    expected_version: &str,
+    staging: &Path,
+) -> Result<String, String> {
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(archive_bytes)).map_err(|e| e.to_string())?;
+    let manifest_text = {
+        let mut file = archive
+            .by_name("manifest.json")
+            .map_err(|e| format!("9miho archive has no manifest.json: {e}"))?;
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .map_err(|e| format!("could not read 9miho archive manifest: {e}"))?;
+        text
+    };
+    let manifest: RuntimeArchiveManifest = serde_json::from_str(&manifest_text)
+        .map_err(|e| format!("invalid 9miho archive manifest: {e}"))?;
+    if manifest.version != expected_version
+        || manifest.platform != runtime_platform()
+        || manifest.arch != runtime_arch()
+        || manifest.api_port != MIHO_PORT
+    {
+        return Err(format!(
+            "9miho archive does not match this release (version={}, platform={}, arch={}, port={})",
+            manifest.version, manifest.platform, manifest.arch, manifest.api_port
+        ));
+    }
+    fs::create_dir_all(staging).map_err(|e| e.to_string())?;
+    let mut source = archive
+        .by_name(binary_name())
+        .map_err(|e| format!("9miho archive has no {}: {e}", binary_name()))?;
+    let staged_binary = staging.join(binary_name());
+    let mut destination = fs::File::create(&staged_binary).map_err(|e| e.to_string())?;
+    std::io::copy(&mut source, &mut destination).map_err(|e| e.to_string())?;
+    destination.sync_all().map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&staged_binary, fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(manifest_text)
+}
+
+fn replace_runtime(root: &Path, staged_binary: &Path, manifest: &str) -> Result<(), String> {
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+    let destination = bin_dir.join(binary_name());
+    let backup = bin_dir.join(format!("{}.previous", binary_name()));
+    let old_manifest = fs::read(root.join("manifest.json")).ok();
+    if backup.exists() {
+        fs::remove_file(&backup).map_err(|e| e.to_string())?;
+    }
+    let had_previous = destination.exists();
+    if had_previous {
+        fs::rename(&destination, &backup)
+            .map_err(|e| format!("could not stage the installed 9miho for replacement: {e}"))?;
+    }
+    if let Err(error) = fs::rename(staged_binary, &destination) {
+        if had_previous {
+            let _ = fs::rename(&backup, &destination);
+        }
+        return Err(format!("could not activate the 9miho update: {error}"));
+    }
+    if let Err(error) = fs::write(root.join("manifest.json"), manifest) {
+        let _ = fs::remove_file(&destination);
+        if had_previous {
+            let _ = fs::rename(&backup, &destination);
+        }
+        match old_manifest {
+            Some(old) => {
+                let _ = fs::write(root.join("manifest.json"), old);
+            }
+            None => {
+                let _ = fs::remove_file(root.join("manifest.json"));
+            }
+        }
+        return Err(format!(
+            "could not record the installed 9miho version: {error}"
+        ));
+    }
+    if backup.exists() {
+        fs::remove_file(backup).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn newer_version_available(installed: &str, bundled: &str) -> bool {
@@ -144,8 +352,9 @@ fn health_response_ok(response: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_info, health_response_ok, installed_version_at, newer_version_available,
-        write_install_manifest,
+        binary_name, build_info, download_release, fetch_update_feed, health_response_ok,
+        installed_version_at, newer_version_available, parse_update_feed, replace_runtime,
+        runtime_target, write_install_manifest,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -191,6 +400,61 @@ mod tests {
 
         fs::remove_dir_all(root).expect("remove test install root");
     }
+
+    #[test]
+    fn online_feed_selects_the_current_platform_release() {
+        let target = runtime_target();
+        let feed = format!(
+            r#"{{"version":"0.4.0","platforms":{{"{target}":{{"url":"https://github.com/KumihoIO/9miho-release/releases/download/9miho-v0.4.0/9miho.zip","signature":"untrusted comment: signature from minisign secret key\nRUTestSignature","sha256":"{}"}}}}}}"#,
+            "a".repeat(64)
+        );
+        let (version, release) = parse_update_feed(&feed).expect("valid feed");
+        assert_eq!(version, "0.4.0");
+        assert!(release.url.ends_with("9miho.zip"));
+    }
+
+    #[test]
+    fn runtime_replacement_updates_binary_and_manifest_together() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kumiho-desktop-miho-replace-{}-{unique}",
+            std::process::id()
+        ));
+        let bin = root.join("bin");
+        let staging = root.join("staging");
+        fs::create_dir_all(&bin).expect("create bin");
+        fs::create_dir_all(&staging).expect("create staging");
+        fs::write(bin.join(binary_name()), b"old").expect("write old binary");
+        fs::write(root.join("manifest.json"), r#"{"version":"0.3.0"}"#)
+            .expect("write old manifest");
+        fs::write(staging.join(binary_name()), b"new").expect("write staged binary");
+
+        replace_runtime(
+            &root,
+            &staging.join(binary_name()),
+            r#"{"version":"0.4.0"}"#,
+        )
+        .expect("replace runtime");
+
+        assert_eq!(
+            fs::read(bin.join(binary_name())).expect("read binary"),
+            b"new"
+        );
+        assert_eq!(installed_version_at(&root).as_deref(), Some("0.4.0"));
+        fs::remove_dir_all(root).expect("remove test install root");
+    }
+
+    #[test]
+    #[ignore = "requires the public 9miho release feed"]
+    fn live_public_update_feed_has_a_valid_signed_archive() {
+        let (version, release) = fetch_update_feed().expect("fetch public feed");
+        assert!(semver::Version::parse(&version).is_ok());
+        let bytes = download_release(&release).expect("download and verify signed archive");
+        assert!(!bytes.is_empty());
+    }
 }
 
 #[derive(Serialize)]
@@ -201,6 +465,14 @@ pub struct MihoStatus {
     pub installed: bool,
     pub version: Option<String>,
     pub bundled_version: String,
+    pub update_available: bool,
+}
+
+#[derive(Serialize)]
+pub struct MihoUpdateInfo {
+    pub installed_version: Option<String>,
+    pub bundled_version: String,
+    pub latest_version: String,
     pub update_available: bool,
 }
 
@@ -219,6 +491,56 @@ pub fn miho_status() -> MihoStatus {
         version,
         bundled_version,
     }
+}
+
+#[tauri::command]
+pub fn miho_check_update() -> Result<MihoUpdateInfo, String> {
+    let installed_version = installed_version();
+    let bundled_version = build_info().version;
+    let (latest_version, _) = fetch_update_feed()?;
+    let update_available = installed_version
+        .as_deref()
+        .map(|installed| newer_version_available(installed, &latest_version))
+        .unwrap_or(true);
+    Ok(MihoUpdateInfo {
+        installed_version,
+        bundled_version,
+        latest_version,
+        update_available,
+    })
+}
+
+#[tauri::command]
+pub fn miho_update(state: State<AppState>) -> Result<String, String> {
+    let (latest_version, release) = fetch_update_feed()?;
+    if installed_version()
+        .as_deref()
+        .is_some_and(|installed| !newer_version_available(installed, &latest_version))
+    {
+        return Ok(format!("9miho {latest_version} is already installed"));
+    }
+    let bytes = download_release(&release)?;
+    let root = install_root().ok_or("no home directory")?;
+    fs::create_dir_all(root.join("data")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(root.join("logs")).map_err(|e| e.to_string())?;
+    let staging = root.join(format!(
+        ".update-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    ));
+    let result = (|| {
+        let manifest = unpack_runtime(bytes, &latest_version, &staging)?;
+        miho_stop(state)?;
+        replace_runtime(&root, &staging.join(binary_name()), &manifest)?;
+        Ok(format!("9miho {latest_version} updated"))
+    })();
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
 }
 
 #[tauri::command]

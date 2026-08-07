@@ -5,7 +5,7 @@
 # Own [workspace] so it stays independent of the root kumiho-brain crate.
 [package]
 name = "kumiho-desktop"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.77"
 description = "Kumiho Desktop — control center for Kumiho Memory, 9miho, and CE/Cloud connections"
@@ -25,6 +25,9 @@ semver = "1"
 dirs = "5"      # locate ~/.kumiho for the Run pillar
 ureq = "2"      # Account: probe the cloud control plane natively — a webview
                 # fetch to control.kumiho.cloud is CORS-blocked (no ACAO header)
+sha2 = "0.10"   # component updates: verify the published archive checksum
+minisign-verify = "0.2" # component updates: verify archives with the Desktop updater key
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Account: cloud token in the OS credential store. keyring 3.x ships NO backend
 # by default — it silently falls back to an in-memory mock, so tokens never
