@@ -43,6 +43,19 @@ After the first install, Kumiho Desktop **updates itself**. It checks quietly on
 launch and shows the available signed release in **Settings → Apps** — one click
 downloads, installs, and relaunches. No coming back here for links.
 
+Components have separate update channels where their lifecycle is independent:
+
+- **9miho** checks the public binary-only
+  [`KumihoIO/9miho-release`](https://github.com/KumihoIO/9miho-release) feed.
+  Desktop verifies both SHA-256 and the component Minisign signature before
+  replacing the runtime, then restarts it and re-reads the installed version.
+- **Kumiho Memory** reports the engine versions in agent-owned Python virtual
+  environments and checks the canonical
+  [`kumiho-memory` PyPI release](https://pypi.org/project/kumiho-memory/).
+- **Agent adapters** are checked and updated separately under
+  **Settings → Agents**. **Memory View / Kumiho Brain** remains bundled and
+  version-locked with Desktop.
+
 Auto-update covers **macOS** (Apple Silicon), the **Windows** `.exe` installer,
 and the Linux **AppImage**. The `.deb`/`.rpm` packages and Intel Macs update by
 re-downloading from Releases.
@@ -98,6 +111,11 @@ signed prebuild is copied into `~/.kumiho/apps/9miho`, launched on loopback port
 Community Edition or Kumiho Cloud selection as the rest of Desktop; switching
 mode never silently falls back to the other service.
 
+The installer includes an offline fallback, but subsequent 9miho releases do
+not require a new Desktop release: Desktop checks `9miho-release`, downloads the
+current platform archive, validates its signed manifest, and preserves existing
+projects, assets, data, and logs during replacement.
+
 9miho is free for local single-user use under its own license. Provider keys and
 generated media remain in 9miho's profile/storage boundary. The Kumiho Cloud
 service token remains in the OS credential store and is injected only into the
@@ -150,6 +168,11 @@ The workflow reads the pinned private build from
 `NINE_MIHO_RELEASE_TOKEN` must be a fine-grained token (or GitHub App token) with
 read-only Contents access to `KumihoIO/9miho`. The token is used only by Actions
 to download the private release archive; it is never shipped to users.
+
+The private 9miho release workflow separately signs each archive and publishes
+only runtime binaries, checksums, signatures, and `latest.json` to the public
+`KumihoIO/9miho-release` repository. Desktop embeds only the public verification
+key; source access and a GitHub token are never required on user machines.
 
 On macOS, the release job checks out the pinned private 9miho tag, verifies that
 it resolves to the recorded merge commit, and gives its PyInstaller build the
