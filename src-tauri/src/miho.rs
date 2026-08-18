@@ -513,6 +513,7 @@ fn terminate_tracked(
 }
 
 /// Stop every 9miho on this machine and do not return until 9999 is free.
+/// Caller must hold [`lifecycle_lock`].
 fn stop_miho(state: &AppState) -> Result<(), String> {
     terminate_tracked(&state.miho, STOP_GRACE)?;
     kill_orphan_miho(false);
@@ -754,14 +755,23 @@ pub fn miho_update(state: State<AppState>) -> Result<String, String> {
     let app: &AppState = &state;
     let result = (|| {
         let manifest = unpack_runtime(bytes, &latest_version, &staging)?;
+        // Held from here so no start can slip between the stop and the swap.
+        let _lifecycle = lifecycle_lock(app)?;
         // Must stop BEFORE swapping the binary, and must actually stop: an orphan
         // from a previous Desktop session keeps serving the old build otherwise.
         stop_miho(app)?;
         replace_runtime(&root, &staging.join(binary_name()), &manifest)?;
         // ...and restart here rather than leaving it to the frontend, so the
         // update is never reported as done while nothing is running the new bits.
-        start_miho(app)?;
-        Ok(format!("9miho {latest_version} updated and restarted"))
+        // Past this point the new build IS installed, so a restart that fails
+        // (no mode chosen yet, cloud token gone) must not be reported as a failed
+        // update — that sends the user back to re-download what already landed.
+        Ok(match start_miho(app) {
+            Ok(_) => format!("9miho {latest_version} updated and restarted"),
+            Err(error) => {
+                format!("9miho {latest_version} updated, but it did not restart: {error}")
+            }
+        })
     })();
     if staging.exists() {
         let _ = fs::remove_dir_all(&staging);
@@ -772,6 +782,7 @@ pub fn miho_update(state: State<AppState>) -> Result<String, String> {
 #[tauri::command]
 pub fn miho_install(state: State<AppState>) -> Result<String, String> {
     let app: &AppState = &state;
+    let _lifecycle = lifecycle_lock(app)?;
     stop_miho(app)?;
     let source = bundled_binary().ok_or(
         "this development build does not contain 9miho; use a Kumiho Desktop release installer",
@@ -794,25 +805,33 @@ pub fn miho_install(state: State<AppState>) -> Result<String, String> {
         fs::set_permissions(&destination, permissions).map_err(|e| e.to_string())?;
     }
     write_install_manifest(&root)?;
-    start_miho(app)?;
-    Ok(format!(
-        "9miho {} installed and restarted",
-        build_info().version
-    ))
+    // Installed either way; only the restart can still fail. See miho_update.
+    let version = build_info().version;
+    Ok(match start_miho(app) {
+        Ok(_) => format!("9miho {version} installed and restarted"),
+        Err(error) => format!("9miho {version} installed, but it did not restart: {error}"),
+    })
 }
 
 #[tauri::command]
 pub fn miho_start(state: State<AppState>) -> Result<String, String> {
+    let _lifecycle = lifecycle_lock(&state)?;
     start_miho(&state)
 }
 
-fn start_miho(state: &AppState) -> Result<String, String> {
-    // Serialize the whole check-then-spawn. Three UI paths can call this at once
-    // (Apps install, product tab, empty-state button); a 40MB PyInstaller onefile
-    // takes seconds to extract before it binds, so unguarded callers all saw a
-    // closed port and every one of them spawned.
-    let _starting = state.miho_start.lock().map_err(|e| e.to_string())?;
+/// Serializes every mutation of 9miho's lifecycle — stop, binary swap, spawn.
+/// Three UI paths can start at once (Apps install, product tab, empty-state
+/// button) and a 40MB PyInstaller onefile takes seconds to extract before it
+/// binds, so unguarded callers all saw a closed port and every one of them
+/// spawned. Stop and install/update take the same lock: a start that slips
+/// between an update's stop and its swap spawns the build about to be replaced,
+/// and on Windows that runtime holds the binary open so the swap fails outright.
+fn lifecycle_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    state.miho_start.lock().map_err(|e| e.to_string())
+}
 
+/// Caller must hold [`lifecycle_lock`].
+fn start_miho(state: &AppState) -> Result<String, String> {
     let (reachable, serving) = runtime_state();
     if reachable {
         if !is_stale(installed_version().as_deref(), true, serving.as_deref()) {
@@ -903,6 +922,7 @@ pub fn kill_tracked_miho(app: &tauri::AppHandle) {
 
 #[tauri::command]
 pub fn miho_stop(state: State<AppState>) -> Result<String, String> {
+    let _lifecycle = lifecycle_lock(&state)?;
     stop_miho(&state)?;
     Ok("9miho stopped".into())
 }
