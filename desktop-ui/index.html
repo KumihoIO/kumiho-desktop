@@ -728,7 +728,8 @@
     if(name==='brain') return;
     let status; try{ status=await invoke('miho_status'); }catch(e){ toast(String(e),true); return; }
     await refreshStatus();
-    if(status.reachable){ loadMiho(); return; }
+    if(status.reachable&&!status.stale){ loadMiho(); return; }
+    if(status.stale){ await startMiho(true); return; }
     if(status.installed && !status.update_available && !MIHO_UPDATE?.update_available) await startMiho(false);
   }
   function loadMiho(){ $('miho-frame').src='http://127.0.0.1:9999/?t='+Date.now(); }
@@ -803,12 +804,24 @@
     }catch(e){ setLog('apps',String(e),true); toast(String(e),true); await refreshApps(); }
     finally{ if(button) button.disabled=false; }
   }
+  let MIHO_START_IN_FLIGHT=null;
   async function startMiho(force){
     if(UPDATING) return false;
+    // Coalesce concurrent plain starts: installOrUpdateMiho() and showProduct()
+    // both call this, and two starts used to mean two runtimes racing for 9999.
+    // A forced restart is a real user request, so it never joins an in-flight one.
+    if(!force && MIHO_START_IN_FLIGHT) return MIHO_START_IN_FLIGHT;
+    const run=startMihoOnce(force);
+    if(!force){ MIHO_START_IN_FLIGHT=run; run.finally(()=>{ if(MIHO_START_IN_FLIGHT===run) MIHO_START_IN_FLIGHT=null; }); }
+    return run;
+  }
+  async function startMihoOnce(force){
     if(force){ try{ await invoke('miho_stop'); }catch(e){} await new Promise(r=>setTimeout(r,350)); }
     toast(force?'restarting 9miho…':'starting 9miho…');
     try{ await invoke('miho_start'); }catch(e){ toast(String(e),true); return false; }
-    const up=await waitFor(()=>invoke('miho_status').then(s=>s.reachable),40000);
+    // Reachable is not enough — a leftover runtime from before an update answers
+    // healthz just fine. Wait until the build on 9999 is the one we installed.
+    const up=await waitFor(()=>invoke('miho_status').then(s=>s.reachable&&!s.stale),40000);
     if(up){ MIHO_CONFIRMED_REACHABLE=true; MIHO_HEALTH_MISSES=0; loadMiho(); $('miho-empty').classList.add('hide'); }
     else toast('9miho did not start on 9999 — see ~/.kumiho/apps/9miho/logs/9miho.log',true);
     refreshStatus();
@@ -982,8 +995,10 @@
     try{
       const miho=mihoStatus||await invoke('miho_status');
       if(!isCurrent()) return;
-      pill($('miho-app-pill'),miho.reachable,miho.reachable?'running':(miho.installed?'stopped':'not installed'));
-      $('miho-version').textContent=miho.version?'Version '+miho.version:'Not installed';
+      pill($('miho-app-pill'),miho.reachable&&!miho.stale,miho.stale?'restart required':(miho.reachable?'running':(miho.installed?'stopped':'not installed')));
+      $('miho-version').textContent=miho.version
+        ?'Version '+miho.version+(miho.stale?' installed · serving '+(miho.serving_version||'an older build'):'')
+        :'Not installed';
       renderMihoUpdate(miho);
     }catch(e){ if(isCurrent()){ pill($('miho-app-pill'),false,'unavailable'); setLog('apps',String(e),true); } }
   }

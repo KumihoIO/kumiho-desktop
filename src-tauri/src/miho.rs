@@ -28,6 +28,10 @@ const UPDATE_FEED_URL: &str =
 // archive before publishing it to the public binary-only release repository.
 const UPDATE_PUBLIC_KEY: &str = "RWQVYAIfinTi8U4QHo9OKjUXrg/VcKAMm9McT7PFNhjwUHwy5TUKLFys";
 const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
+/// How long a 9miho gets to shut down gracefully before we force it.
+const STOP_GRACE: Duration = Duration::from_secs(8);
+/// The same, on the app-quit path — quitting must not visibly hang.
+const EXIT_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Deserialize)]
 struct BuildInfo {
@@ -287,16 +291,18 @@ fn newer_version_available(installed: &str, bundled: &str) -> bool {
     }
 }
 
-fn health_ok() -> bool {
+/// One `/api/healthz` round trip. `Some(bytes)` only when 9miho answered with a
+/// complete, healthy response — so callers can also read fields out of the body.
+fn health_probe() -> Option<Vec<u8>> {
     let addr: SocketAddr = ([127, 0, 0, 1], MIHO_PORT).into();
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(400)) else {
-        return false;
+        return None;
     };
     if stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .is_err()
     {
-        return false;
+        return None;
     }
     let request = concat!(
         "GET /api/healthz HTTP/1.1\r\n",
@@ -305,7 +311,7 @@ fn health_ok() -> bool {
         "Connection: close\r\n\r\n"
     );
     if stream.write_all(request.as_bytes()).is_err() {
-        return false;
+        return None;
     }
     // Do not use `read_to_string`: it waits for EOF, so a healthy keep-alive
     // response can be misreported as a timeout after its complete body arrived.
@@ -314,20 +320,20 @@ fn health_ok() -> bool {
     let mut chunk = [0_u8; 512];
     loop {
         match stream.read(&mut chunk) {
-            Ok(0) => return health_response_ok(&response),
+            Ok(0) => return health_response_ok(&response).then_some(response),
             Ok(read) => {
                 response.extend_from_slice(&chunk[..read]);
                 if health_response_ok(&response) {
-                    return true;
+                    return Some(response);
                 }
                 if response.len() > 64 * 1024 {
-                    return false;
+                    return None;
                 }
             }
             Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                return false;
+                return None;
             }
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
 }
@@ -349,12 +355,185 @@ fn health_response_ok(response: &[u8]) -> bool {
         .is_some_and(|status| status == "ok")
 }
 
+/// The version reported inside a healthy `/api/healthz` body, when 9miho
+/// publishes one. Older runtimes omit it, hence the stamp fallback below.
+fn health_response_version(response: &[u8]) -> Option<String> {
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")?;
+    serde_json::from_slice::<serde_json::Value>(&response[header_end + 4..])
+        .ok()?
+        .get("version")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+#[derive(Serialize, Deserialize)]
+struct RuntimeStamp {
+    pid: u32,
+    version: String,
+}
+
+fn runtime_stamp_path() -> Option<std::path::PathBuf> {
+    Some(install_root()?.join("runtime.json"))
+}
+
+/// Record which build we just spawned. `manifest.json` describes what is ON DISK;
+/// this describes what is actually RUNNING. Conflating the two is what let an
+/// update silently leave the previous 9miho serving on 9999.
+fn write_runtime_stamp(pid: u32, version: &str) {
+    let Some(path) = runtime_stamp_path() else {
+        return;
+    };
+    if let Ok(text) = serde_json::to_string(&RuntimeStamp {
+        pid,
+        version: version.to_owned(),
+    }) {
+        let _ = fs::write(path, text);
+    }
+}
+
+fn read_runtime_stamp() -> Option<RuntimeStamp> {
+    let text = fs::read_to_string(runtime_stamp_path()?).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn clear_runtime_stamp() {
+    if let Some(path) = runtime_stamp_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// `(something healthy is on 9999, which version it is serving)`.
+fn runtime_state() -> (bool, Option<String>) {
+    let Some(response) = health_probe() else {
+        return (false, None);
+    };
+    let serving = health_response_version(&response)
+        .or_else(|| read_runtime_stamp().map(|stamp| stamp.version));
+    (true, serving)
+}
+
+fn is_stale(installed: Option<&str>, reachable: bool, serving: Option<&str>) -> bool {
+    if !reachable {
+        return false;
+    }
+    let Some(installed) = installed else {
+        return false;
+    };
+    // No stamp and no version in the health body means we cannot PROVE the
+    // running process is the installed build. Treat that as stale: one extra
+    // restart is cheap, silently serving the previous build is the bug.
+    match serving {
+        Some(serving) => serving != installed,
+        None => true,
+    }
+}
+
+fn wait_for_port_closed(timeout: Duration) -> bool {
+    let addr: SocketAddr = ([127, 0, 0, 1], MIHO_PORT).into();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Kill 9miho processes this Desktop session does not own — the ones left behind
+/// by a previous session, which `state.miho` knows nothing about.
+fn kill_orphan_miho(force: bool) {
+    let Some(binary) = installed_binary() else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        // Windows has no graceful signal for a console process: taskkill without
+        // /F sends WM_CLOSE, which 9miho never sees, so the polite attempt would
+        // only cost us the full STOP_GRACE before we forced it anyway.
+        let _ = (binary, force);
+        let _ = command("taskkill")
+            .args(["/IM", binary_name(), "/T", "/F"])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(path) = binary.to_str() else {
+            return;
+        };
+        let signal = if force { "-KILL" } else { "-TERM" };
+        let _ = command("pkill").args([signal, "-f", path]).output();
+    }
+}
+
+fn terminate_tracked(
+    process: &Mutex<Option<std::process::Child>>,
+    grace: Duration,
+) -> Result<(), String> {
+    let child = process.lock().map_err(|e| e.to_string())?.take();
+    let Some(mut child) = child else {
+        return Ok(());
+    };
+    #[cfg(windows)]
+    {
+        let _ = grace;
+        let pid = child.id().to_string();
+        let _ = command("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .output();
+    }
+    #[cfg(unix)]
+    {
+        // SIGTERM before SIGKILL: the PyInstaller onefile runtime only removes
+        // its extracted _MEI temp directory on a graceful exit, so SIGKILL leaks
+        // ~40MB of temp per run. std::process::Child::kill is SIGKILL only.
+        // SAFETY: kill(2) on a pid this process owns and has not yet reaped; the
+        // worst case is ESRCH, which we ignore.
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                _ => {
+                    let _ = child.kill();
+                    break;
+                }
+            }
+        }
+    }
+    let _ = child.wait();
+    Ok(())
+}
+
+/// Stop every 9miho on this machine and do not return until 9999 is free.
+fn stop_miho(state: &AppState) -> Result<(), String> {
+    terminate_tracked(&state.miho, STOP_GRACE)?;
+    kill_orphan_miho(false);
+    if !wait_for_port_closed(STOP_GRACE) {
+        kill_orphan_miho(true);
+        if !wait_for_port_closed(Duration::from_secs(3)) {
+            return Err(
+                "9miho is still holding 127.0.0.1:9999 — stop it manually and try again".into(),
+            );
+        }
+    }
+    clear_runtime_stamp();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         binary_name, build_info, download_release, fetch_update_feed, health_response_ok,
-        installed_version_at, newer_version_available, parse_update_feed, replace_runtime,
-        runtime_target, write_install_manifest,
+        health_response_version, installed_version_at, is_stale, newer_version_available,
+        parse_update_feed, replace_runtime, runtime_target, write_install_manifest,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -374,6 +553,37 @@ mod tests {
         assert!(!health_response_ok(
             b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 20\r\n\r\n{\"status\":\"starting\"}"
         ));
+    }
+
+    #[test]
+    fn reads_the_version_out_of_a_health_body() {
+        assert_eq!(
+            health_response_version(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 34\r\n\r\n{\"status\":\"ok\",\"version\":\"0.13.4\"}"
+            )
+            .as_deref(),
+            Some("0.13.4")
+        );
+        assert_eq!(
+            health_response_version(
+                b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\n\r\n{\"status\":\"ok\"}"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_runtime_serving_a_different_build_than_the_one_installed_is_stale() {
+        // The regression this guards: update wrote 0.13.4 to disk while 0.13.1
+        // kept answering on 9999, and Desktop reported success.
+        assert!(is_stale(Some("0.13.4"), true, Some("0.13.1")));
+        assert!(!is_stale(Some("0.13.4"), true, Some("0.13.4")));
+        // Nothing listening: nothing to retire.
+        assert!(!is_stale(Some("0.13.4"), false, None));
+        // Unknown serving version cannot be proven current, so restart it.
+        assert!(is_stale(Some("0.13.4"), true, None));
+        // Nothing installed: leave whatever is running alone.
+        assert!(!is_stale(None, true, None));
     }
 
     #[test]
@@ -466,6 +676,12 @@ pub struct MihoStatus {
     pub version: Option<String>,
     pub bundled_version: String,
     pub update_available: bool,
+    /// The build answering on 9999, which is not necessarily `version` (that one
+    /// is read from manifest.json on disk).
+    pub serving_version: Option<String>,
+    /// A 9miho is running, but it is not the build we have installed — it needs a
+    /// restart before the update actually takes effect.
+    pub stale: bool,
 }
 
 #[derive(Serialize)]
@@ -480,14 +696,18 @@ pub struct MihoUpdateInfo {
 pub fn miho_status() -> MihoStatus {
     let bundled_version = build_info().version;
     let version = installed_version();
+    // One probe, both answers: whether anything is serving and what it is.
+    let (reachable, serving_version) = runtime_state();
     MihoStatus {
-        reachable: health_ok(),
+        reachable,
         port: MIHO_PORT,
         bundled: bundled_binary().is_some(),
         installed: installed_binary().is_some(),
         update_available: version
             .as_deref()
             .is_some_and(|v| newer_version_available(v, &bundled_version)),
+        stale: is_stale(version.as_deref(), reachable, serving_version.as_deref()),
+        serving_version,
         version,
         bundled_version,
     }
@@ -531,11 +751,17 @@ pub fn miho_update(state: State<AppState>) -> Result<String, String> {
             .map_err(|e| e.to_string())?
             .as_nanos()
     ));
+    let app: &AppState = &state;
     let result = (|| {
         let manifest = unpack_runtime(bytes, &latest_version, &staging)?;
-        miho_stop(state)?;
+        // Must stop BEFORE swapping the binary, and must actually stop: an orphan
+        // from a previous Desktop session keeps serving the old build otherwise.
+        stop_miho(app)?;
         replace_runtime(&root, &staging.join(binary_name()), &manifest)?;
-        Ok(format!("9miho {latest_version} updated"))
+        // ...and restart here rather than leaving it to the frontend, so the
+        // update is never reported as done while nothing is running the new bits.
+        start_miho(app)?;
+        Ok(format!("9miho {latest_version} updated and restarted"))
     })();
     if staging.exists() {
         let _ = fs::remove_dir_all(&staging);
@@ -545,7 +771,8 @@ pub fn miho_update(state: State<AppState>) -> Result<String, String> {
 
 #[tauri::command]
 pub fn miho_install(state: State<AppState>) -> Result<String, String> {
-    miho_stop(state)?;
+    let app: &AppState = &state;
+    stop_miho(app)?;
     let source = bundled_binary().ok_or(
         "this development build does not contain 9miho; use a Kumiho Desktop release installer",
     )?;
@@ -567,14 +794,46 @@ pub fn miho_install(state: State<AppState>) -> Result<String, String> {
         fs::set_permissions(&destination, permissions).map_err(|e| e.to_string())?;
     }
     write_install_manifest(&root)?;
-    Ok(format!("9miho {} installed", build_info().version))
+    start_miho(app)?;
+    Ok(format!(
+        "9miho {} installed and restarted",
+        build_info().version
+    ))
 }
 
 #[tauri::command]
 pub fn miho_start(state: State<AppState>) -> Result<String, String> {
-    if health_ok() {
-        return Ok("9miho already serving on 9999".into());
+    start_miho(&state)
+}
+
+fn start_miho(state: &AppState) -> Result<String, String> {
+    // Serialize the whole check-then-spawn. Three UI paths can call this at once
+    // (Apps install, product tab, empty-state button); a 40MB PyInstaller onefile
+    // takes seconds to extract before it binds, so unguarded callers all saw a
+    // closed port and every one of them spawned.
+    let _starting = state.miho_start.lock().map_err(|e| e.to_string())?;
+
+    let (reachable, serving) = runtime_state();
+    if reachable {
+        if !is_stale(installed_version().as_deref(), true, serving.as_deref()) {
+            return Ok("9miho already serving on 9999".into());
+        }
+        // Healthy, but not the build we have on disk — the previous runtime
+        // survived an update. Retiring it here is the whole point of this guard.
+        stop_miho(state)?;
     }
+
+    // A child we already spawned that has not finished booting yet. Never spawn a
+    // second one: it loses the bind race, and storing it would orphan the first.
+    {
+        let mut tracked = state.miho.lock().map_err(|e| e.to_string())?;
+        match tracked.as_mut().map(std::process::Child::try_wait) {
+            Some(Ok(None)) => return Ok("9miho is already starting on 9999".into()),
+            Some(_) => *tracked = None,
+            None => {}
+        }
+    }
+
     let addr: SocketAddr = ([127, 0, 0, 1], MIHO_PORT).into();
     if TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok() {
         return Err("port 9999 is occupied by a process that is not 9miho".into());
@@ -626,37 +885,24 @@ pub fn miho_start(state: State<AppState>) -> Result<String, String> {
     }
 
     let child = child.spawn().map_err(|e| e.to_string())?;
+    write_runtime_stamp(
+        child.id(),
+        installed_version().as_deref().unwrap_or_default(),
+    );
     *state.miho.lock().map_err(|e| e.to_string())? = Some(child);
     Ok(format!("9miho starting on {MIHO_PORT}"))
 }
 
-fn stop_tracked(process: &Mutex<Option<std::process::Child>>) -> Result<(), String> {
-    let child = process.lock().map_err(|e| e.to_string())?.take();
-    let Some(mut child) = child else {
-        return Ok(());
-    };
-    #[cfg(windows)]
-    {
-        let pid = child.id().to_string();
-        let _ = command("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .output();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-    Ok(())
-}
-
+/// App shutdown: retire the child we own so it does not become the orphan that
+/// the next session's update has to fight.
 pub fn kill_tracked_miho(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    let _ = stop_tracked(&state.miho);
+    let _ = terminate_tracked(&state.miho, EXIT_GRACE);
+    clear_runtime_stamp();
 }
 
 #[tauri::command]
 pub fn miho_stop(state: State<AppState>) -> Result<String, String> {
-    stop_tracked(&state.miho)?;
+    stop_miho(&state)?;
     Ok("9miho stopped".into())
 }
