@@ -25,6 +25,9 @@ use std::sync::Mutex;
 pub struct AppState {
     pub brain: Mutex<Option<std::process::Child>>,
     pub miho: Mutex<Option<std::process::Child>>,
+    /// Held across 9miho's check-then-spawn so two UI paths cannot both decide
+    /// the port is free and each launch a runtime.
+    pub miho_start: Mutex<()>,
 }
 
 fn main() {

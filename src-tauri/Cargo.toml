@@ -29,6 +29,11 @@ sha2 = "0.10"   # component updates: verify the published archive checksum
 minisign-verify = "0.2" # component updates: verify archives with the Desktop updater key
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Retiring 9miho: SIGTERM before SIGKILL so the PyInstaller onefile runtime can
+# remove its extracted _MEI temp directory. std only offers SIGKILL.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Account: cloud token in the OS credential store. keyring 3.x ships NO backend
 # by default — it silently falls back to an in-memory mock, so tokens never
 # persist (0.1.2 shipped that way). Each platform must opt into its real vault.
