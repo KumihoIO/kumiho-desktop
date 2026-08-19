@@ -1,13 +1,23 @@
 // Bringing Desktop back to the front.
 //
-// macOS keeps the process alive after its last window closes, so `main` can be
-// gone while Desktop is still running. Focusing a window that no longer exists
-// is a no-op, and `single_instance` makes every later launch exit cleanly
-// against that live process, so the app looked like it started and did nothing
-// — permanently, until the process was killed by hand.
+// `single_instance` makes every launch after the first exit cleanly and hand
+// the request to the process already running, so what that process does here
+// is the app's only way back onto the screen. It used to call `set_focus()`
+// and give up when the window was missing, which left two states with no way
+// out: once in them, every later launch looked like it did nothing at all.
 //
-// Recreate the window from the same declaration the app starts with instead,
-// and give the Dock icon the same path.
+// 1. The window is still there but focus alone cannot raise it — minimized,
+//    hidden, or ordered out. This is the state the report was in: destroying
+//    the last window fires ExitRequested, which pkills kumiho-brain, and that
+//    Brain was still running after twelve days, so the window still existed.
+//    unminimize() → show() → set_focus() is what recovers it, and dropping any
+//    of the three brings the bug back.
+// 2. The window is really gone and the process is still up. Tauri normally
+//    exits with the last window, so this needs an exit that was prevented or
+//    that stalled — and then focus has nothing to act on, so only rebuilding
+//    from the declaration in tauri.conf.json puts a window back.
+//
+// RunEvent::Reopen sends the macOS Dock icon down the same two paths.
 
 use tauri::utils::config::WindowConfig;
 use tauri::{AppHandle, Manager, WebviewWindowBuilder};
@@ -23,7 +33,7 @@ pub fn main_window_config(config: &tauri::Config) -> Option<&WindowConfig> {
 /// Show the main window, recreating it when it is gone.
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window(MAIN) {
-        // Focus alone does not raise a minimized or hidden window.
+        // All three, in this order — see state 1 above.
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
