@@ -17,6 +17,7 @@ mod startup;
 mod update;
 mod upgrade;
 mod util;
+mod window;
 
 use std::sync::Mutex;
 
@@ -33,13 +34,11 @@ pub struct AppState {
 fn main() {
     tauri::Builder::default()
         // Must be the FIRST plugin. A second launch (notably the updater
-        // relaunching the app on Windows) just focuses the running window
-        // instead of spawning a duplicate that would race the Brain on 8090.
+        // relaunching the app on Windows) hands the window back to the running
+        // instance instead of spawning a duplicate that would race the Brain
+        // on 8090.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            use tauri::Manager;
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_focus();
-            }
+            window::show_main(app);
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -99,14 +98,20 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building Kumiho Desktop")
-        .run(|app, event| {
+        .run(|app, event| match event {
             // The Brain runs as a detached child that nothing else reaps. Left
             // alive past the app it keeps kumiho-brain(.exe) locked, so the next
             // install/update can't replace it (the reinstall conflict). Kill it
             // as we exit.
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+            tauri::RunEvent::ExitRequested { .. } => {
                 run::kill_brain();
                 miho::kill_tracked_miho(app);
             }
+            // Clicking the Dock icon is how macOS asks for the window back once
+            // the last one was closed. Without this the app stays running with
+            // nothing on screen and no way in.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => window::show_main(app),
+            _ => {}
         });
 }

@@ -101,8 +101,10 @@ jobs:
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
             libdbus-1-dev pkg-config   # keyring sync-secret-service → dbus-secret-service
 
-      - name: 9miho updater unit tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked miho
+      - name: Desktop unit tests
+        # Unfiltered: the `miho` filter used to skip every other module's tests,
+        # including the window-recovery guard.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
 
       - name: Build kumiho-brain and stage it as a sidecar
         shell: bash
