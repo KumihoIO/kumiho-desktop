@@ -11,7 +11,7 @@
 use crate::util::{ce_binary, command, kumiho_home};
 use crate::AppState;
 use serde::Serialize;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::Stdio;
 use std::time::Duration;
@@ -157,21 +157,70 @@ pub fn ce_configure(
     Ok(format!("wrote {}", path.display()))
 }
 
+/// `~/.kumiho/logs/kumiho_server.log` — fresh per start, written by `ce_start`.
+fn ce_log_path() -> Option<std::path::PathBuf> {
+    Some(kumiho_home()?.join("logs").join("kumiho_server.log"))
+}
+
+/// The last non-empty lines of the server log, reading at most the final 16KB
+/// so a long-lived log stays cheap to tail.
+fn ce_log_tail_text(max_lines: usize) -> String {
+    let Some(path) = ce_log_path() else {
+        return String::new();
+    };
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = file.seek(std::io::SeekFrom::Start(len.saturating_sub(16 * 1024)));
+    let mut buf = String::new();
+    let _ = file.read_to_string(&mut buf);
+    let lines: Vec<&str> = buf.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(max_lines)..].join("\n")
+}
+
+/// The tail of the CE server log, for the UI to show when a start goes wrong.
+#[tauri::command]
+pub fn ce_log_tail() -> String {
+    ce_log_tail_text(40)
+}
+
 /// Start the CE server with our written config (`KUMIHO_CONFIG`). Databases must
 /// be up first (see the docker pillar).
 #[tauri::command]
 pub fn ce_start() -> Result<String, String> {
     let bin = ce_binary().ok_or("kumiho_server is not installed yet")?;
-    let cfg = kumiho_home().ok_or("no home directory")?.join("server.toml");
+    let home = kumiho_home().ok_or("no home directory")?;
+    let cfg = home.join("server.toml");
     if !cfg.exists() {
         return Err("not configured yet — finish setup first".into());
     }
-    command(bin.to_str().ok_or("bad path")?)
+    // Log to a file, not null: a server that dies on a bad config or a wrong
+    // Neo4j password must leave its reason somewhere the UI can surface — a
+    // silent death here is indistinguishable from "never came up".
+    std::fs::create_dir_all(home.join("logs")).map_err(|e| e.to_string())?;
+    let log = std::fs::File::create(ce_log_path().ok_or("no home directory")?)
+        .map_err(|e| e.to_string())?;
+    let log_err = log.try_clone().map_err(|e| e.to_string())?;
+    let mut child = command(bin.to_str().ok_or("bad path")?)
         .env("KUMIHO_CONFIG", &cfg)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
         .spawn()
         .map_err(|e| e.to_string())?;
+    // Catch an immediate death so the caller gets the actual reason instead of
+    // a generic health-wait timeout.
+    for _ in 0..10 {
+        std::thread::sleep(Duration::from_millis(250));
+        if let Ok(Some(status)) = child.try_wait() {
+            let tail = ce_log_tail_text(15);
+            return Err(if tail.is_empty() {
+                format!("kumiho_server exited immediately ({status})")
+            } else {
+                format!("kumiho_server exited immediately ({status}):\n{tail}")
+            });
+        }
+    }
     Ok("kumiho_server starting on 9190".into())
 }
 
