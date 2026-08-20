@@ -313,7 +313,10 @@
   const T = window.__TAURI__;
   const invoke = (c,a) => T.core.invoke(c,a);
   const $ = (id) => document.getElementById(id);
-  const setLog = (id,msg,bad) => {const e=$('log-'+id)||$(id+'-log');if(!e)return;e.textContent=msg||'';e.className='log'+(bad?' bad':'');};
+  // Also try the bare id: the first-run panels are literally id="ce-log" /
+  // id="cloud-log", which the two prefixed forms both miss — every wizard
+  // message (including step-4 failure diagnostics) was silently dropped.
+  const setLog = (id,msg,bad) => {const e=$('log-'+id)||$(id+'-log')||$(id);if(!e)return;e.textContent=msg||'';e.className='log'+(bad?' bad':'');};
   function openUrl(u){ try{ if(T.opener) T.opener.openUrl(u); else window.open(u,'_blank'); }catch(e){ window.open(u,'_blank'); } }
   let toastT; function toast(msg,bad){ const el=$('toast'); el.textContent=msg; el.className='toast show'+(bad?' bad':''); clearTimeout(toastT); toastT=setTimeout(()=>el.className='toast'+(bad?' bad':''),2600); }
 
@@ -370,12 +373,24 @@
       markStep('install','done'); markStep('db','active'); setLog('ce-log','Starting Neo4j + Redis in Docker (first run may pull images)…');
       await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis });
       markStep('db','done'); markStep('config','active');
-      if(!st.configured){ setLog('ce-log','Writing config…');
-        await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true }); }
+      // Always rewrite the config: the wizard's password must win. Skipping this
+      // when server.toml already existed let a retyped password drift from the
+      // container's, and the server then died on Neo4j auth with no visible cause.
+      setLog('ce-log','Writing config…');
+      await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true });
       markStep('config','done'); markStep('start','active'); setLog('ce-log','Starting the server, waiting for it to answer on 9190…');
       await invoke('ce_start');
       const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable), 40000);
-      if(!up){ setLog('ce-log','Server did not answer on 9190 within 40s — check Docker/Neo4j, then use Start again.',true); return; }
+      if(!up){
+        let tail=''; try{ tail=await invoke('ce_log_tail'); }catch(e){}
+        // Positive auth signals only — a loose match (e.g. bare "auth") fires on
+        // ordinary startup lines and would misdiagnose unrelated failures.
+        let msg = /unauthorized|authentication|invalid credentials|wrong password/i.test(tail)
+          ? 'The server could not log in to Neo4j — the password from this setup does not match the one the database container was created with. Re-run setup with the container\'s original password (a container keeps its first password; typing a new one here cannot change it).'
+          : 'Server did not answer on 9190 within 40s — check Docker/Neo4j, then use Start again.';
+        if(tail) msg += '\n— kumiho_server log (~/.kumiho/logs/kumiho_server.log) —\n'+tail;
+        setLog('ce-log',msg,true); return;
+      }
       markStep('start','done'); await adoptCE();
     }catch(e){ setLog('ce-log',String(e),true); }
   }

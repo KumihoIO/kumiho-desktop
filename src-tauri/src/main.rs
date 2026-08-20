@@ -58,6 +58,7 @@ fn main() {
             run::ce_configure,
             run::ce_start,
             run::ce_stop,
+            run::ce_log_tail,
             run::brain_status,
             run::brain_start,
             run::brain_stop,
