@@ -313,7 +313,10 @@
   const T = window.__TAURI__;
   const invoke = (c,a) => T.core.invoke(c,a);
   const $ = (id) => document.getElementById(id);
-  const setLog = (id,msg,bad) => {const e=$('log-'+id)||$(id+'-log');if(!e)return;e.textContent=msg||'';e.className='log'+(bad?' bad':'');};
+  // Also try the bare id: the first-run panels are literally id="ce-log" /
+  // id="cloud-log", which the two prefixed forms both miss — every wizard
+  // message (including step-4 failure diagnostics) was silently dropped.
+  const setLog = (id,msg,bad) => {const e=$('log-'+id)||$(id+'-log')||$(id);if(!e)return;e.textContent=msg||'';e.className='log'+(bad?' bad':'');};
   function openUrl(u){ try{ if(T.opener) T.opener.openUrl(u); else window.open(u,'_blank'); }catch(e){ window.open(u,'_blank'); } }
   let toastT; function toast(msg,bad){ const el=$('toast'); el.textContent=msg; el.className='toast show'+(bad?' bad':''); clearTimeout(toastT); toastT=setTimeout(()=>el.className='toast'+(bad?' bad':''),2600); }
 
@@ -380,8 +383,10 @@
       const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable), 40000);
       if(!up){
         let tail=''; try{ tail=await invoke('ce_log_tail'); }catch(e){}
-        let msg = /auth|unauthoriz|credential|password/i.test(tail)
-          ? 'The server could not log in to Neo4j — the container was likely created with a different password. Re-run setup with that password, or remove the container (docker rm -f kumiho-ce-neo4j) and set up again.'
+        // Positive auth signals only — a loose match (e.g. bare "auth") fires on
+        // ordinary startup lines and would misdiagnose unrelated failures.
+        let msg = /unauthorized|authentication|invalid credentials|wrong password/i.test(tail)
+          ? 'The server could not log in to Neo4j — the password from this setup does not match the one the database container was created with. Re-run setup with the container\'s original password (a container keeps its first password; typing a new one here cannot change it).'
           : 'Server did not answer on 9190 within 40s — check Docker/Neo4j, then use Start again.';
         if(tail) msg += '\n— kumiho_server log (~/.kumiho/logs/kumiho_server.log) —\n'+tail;
         setLog('ce-log',msg,true); return;

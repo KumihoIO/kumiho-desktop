@@ -162,33 +162,42 @@ fn ce_log_path() -> Option<std::path::PathBuf> {
     Some(kumiho_home()?.join("logs").join("kumiho_server.log"))
 }
 
-/// The last non-empty lines of the server log, reading at most the final 16KB
-/// so a long-lived log stays cheap to tail.
-fn ce_log_tail_text(max_lines: usize) -> String {
-    let Some(path) = ce_log_path() else {
-        return String::new();
-    };
-    let Ok(mut file) = std::fs::File::open(&path) else {
+/// The last `max_lines` non-empty lines of the file, reading at most the final
+/// 16KB. Decoded lossily: server output is not guaranteed UTF-8 (Windows
+/// codepages, a cut that splits a codepoint), and a strict decode here would
+/// silently drop the whole tail. NULs are stripped — a truncated-under-a-live-
+/// writer log refills the gap with them.
+fn log_tail_text(path: &std::path::Path, max_lines: usize) -> String {
+    let Ok(mut file) = std::fs::File::open(path) else {
         return String::new();
     };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
     let _ = file.seek(std::io::SeekFrom::Start(len.saturating_sub(16 * 1024)));
-    let mut buf = String::new();
-    let _ = file.read_to_string(&mut buf);
-    let lines: Vec<&str> = buf.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut bytes = Vec::new();
+    let _ = file.read_to_end(&mut bytes);
+    let text = String::from_utf8_lossy(&bytes).replace('\0', "");
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(max_lines)..].join("\n")
 }
 
 /// The tail of the CE server log, for the UI to show when a start goes wrong.
 #[tauri::command]
 pub fn ce_log_tail() -> String {
-    ce_log_tail_text(40)
+    ce_log_path()
+        .map(|p| log_tail_text(&p, 40))
+        .unwrap_or_default()
 }
 
 /// Start the CE server with our written config (`KUMIHO_CONFIG`). Databases must
-/// be up first (see the docker pillar).
+/// be up first (see the docker pillar). Async: the startup watch below blocks
+/// for up to ten seconds, which must not park the main thread.
 #[tauri::command]
-pub fn ce_start() -> Result<String, String> {
+pub async fn ce_start() -> Result<String, String> {
+    // Mirror brain_start's guard: a second spawn would lose the bind race AND
+    // truncate the log the running server is still writing.
+    if port_open(CE_PORT) {
+        return Ok(format!("kumiho_server already serving on {CE_PORT}"));
+    }
     let bin = ce_binary().ok_or("kumiho_server is not installed yet")?;
     let home = kumiho_home().ok_or("no home directory")?;
     let cfg = home.join("server.toml");
@@ -196,32 +205,40 @@ pub fn ce_start() -> Result<String, String> {
         return Err("not configured yet — finish setup first".into());
     }
     // Log to a file, not null: a server that dies on a bad config or a wrong
-    // Neo4j password must leave its reason somewhere the UI can surface — a
-    // silent death here is indistinguishable from "never came up".
-    std::fs::create_dir_all(home.join("logs")).map_err(|e| e.to_string())?;
-    let log = std::fs::File::create(ce_log_path().ok_or("no home directory")?)
-        .map_err(|e| e.to_string())?;
-    let log_err = log.try_clone().map_err(|e| e.to_string())?;
-    let mut child = command(bin.to_str().ok_or("bad path")?)
-        .env("KUMIHO_CONFIG", &cfg)
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    // Catch an immediate death so the caller gets the actual reason instead of
-    // a generic health-wait timeout.
-    for _ in 0..10 {
+    // Neo4j password must leave its reason somewhere the UI can surface. Best
+    // effort — an unwritable log file must not block the start itself.
+    let log_files = std::fs::create_dir_all(home.join("logs"))
+        .ok()
+        .and_then(|_| std::fs::File::create(home.join("logs").join("kumiho_server.log")).ok())
+        .and_then(|out| out.try_clone().ok().map(|err| (out, err)));
+    let mut cmd = command(bin.to_str().ok_or("bad path")?);
+    cmd.env("KUMIHO_CONFIG", &cfg);
+    match log_files {
+        Some((out, err)) => cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err)),
+        None => cmd.stdout(Stdio::null()).stderr(Stdio::null()),
+    };
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    // Watch until the server serves or dies, so config/auth failures surface as
+    // the actual error instead of a generic health-wait timeout. Ten seconds
+    // because a wrong Neo4j password only kills the server after driver
+    // retries (seconds, not milliseconds); a healthy server exits this loop as
+    // soon as it binds.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
+        if port_open(CE_PORT) {
+            return Ok(format!("kumiho_server serving on {CE_PORT}"));
+        }
         if let Ok(Some(status)) = child.try_wait() {
-            let tail = ce_log_tail_text(15);
-            return Err(if tail.is_empty() {
-                format!("kumiho_server exited immediately ({status})")
-            } else {
-                format!("kumiho_server exited immediately ({status}):\n{tail}")
-            });
+            let tail = ce_log_tail();
+            let mut msg = format!("kumiho_server exited during startup ({status})");
+            if !tail.is_empty() {
+                msg.push_str(&format!(":\n{tail}"));
+            }
+            return Err(msg);
         }
     }
-    Ok("kumiho_server starting on 9190".into())
+    Ok(format!("kumiho_server starting on {CE_PORT}"))
 }
 
 #[tauri::command]
@@ -355,4 +372,48 @@ pub fn brain_stop(state: State<AppState>) -> Result<String, String> {
     // relaunches in the current mode.
     kill_brain();
     Ok("brain stopped".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_tail_text;
+    use std::io::Write;
+
+    fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn tail_survives_a_multibyte_char_split_by_the_16kb_cut() {
+        // 2 + 3×6000 + 12 bytes: the 16KB cut lands mid-em-dash. A strict
+        // decode of the tail fails and loses everything; lossy must not.
+        let mut bytes = b"aa".to_vec();
+        bytes.extend_from_slice("—".repeat(6000).as_bytes());
+        bytes.extend_from_slice(b"\nfinal line\n");
+        let path = write_temp("kumiho_tail_utf8.log", &bytes);
+        let tail = log_tail_text(&path, 5);
+        std::fs::remove_file(&path).ok();
+        assert!(tail.ends_with("final line"), "{tail:?}");
+    }
+
+    #[test]
+    fn tail_of_a_missing_file_is_empty_and_nuls_are_stripped() {
+        let missing = std::env::temp_dir().join("kumiho_tail_no_such.log");
+        assert_eq!(log_tail_text(&missing, 5), "");
+        let path = write_temp("kumiho_tail_nul.log", b"\0\0\0\nreal error line\n\0\0");
+        let tail = log_tail_text(&path, 5);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(tail, "real error line");
+    }
+
+    #[test]
+    fn tail_keeps_only_the_last_non_empty_lines() {
+        let path = write_temp("kumiho_tail_window.log", b"one\ntwo\n\nthree\n");
+        let tail = log_tail_text(&path, 2);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(tail, "two\nthree");
+    }
 }
