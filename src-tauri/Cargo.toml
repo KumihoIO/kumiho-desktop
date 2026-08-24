@@ -28,6 +28,9 @@ ureq = "2"      # Account: probe the cloud control plane natively — a webview
 sha2 = "0.10"   # component updates: verify the published archive checksum
 minisign-verify = "0.2" # component updates: verify archives with the Desktop updater key
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"         # Revka: unix release archives are tar.gz
+flate2 = "1"        # Revka: gzip reader for the tar archives
+portable-pty = "0.9" # Revka onboarding terminal: real PTY (ConPTY/OpenPTY) for the interactive wizard
 
 # Retiring 9miho: SIGTERM before SIGKILL so the PyInstaller onefile runtime can
 # remove its extracted _MEI temp directory. std only offers SIGKILL.

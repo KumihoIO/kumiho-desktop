@@ -1,0 +1,917 @@
+//! Revka application lifecycle.
+//!
+//! Unlike 9miho, Revka ships no bundled payload: the binary is downloaded at
+//! runtime from the public KumihoIO/Revka GitHub releases (calver tags such as
+//! v2026.6.30), verified against the release SHA256SUMS fail-closed, and
+//! installed into ~/.kumiho/apps/revka/bin. An existing standalone install at
+//! ~/.revka/bin (the official install.ps1/install.sh location) is detected and
+//! reused. "Start" launches `revka daemon` bound to loopback :42617.
+
+use crate::util::{command, kumiho_home};
+use crate::AppState;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::{Manager, State};
+
+const REVKA_PORT: u16 = 42617;
+const RELEASE_API_URL: &str = "https://api.github.com/repos/KumihoIO/Revka/releases/latest";
+const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+/// How long a Revka gets to shut down gracefully before we force it.
+const STOP_GRACE: Duration = Duration::from_secs(8);
+/// The same, on the app-quit path — quitting must not visibly hang.
+const EXIT_GRACE: Duration = Duration::from_secs(3);
+
+#[derive(Deserialize)]
+struct GhAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Deserialize)]
+struct GhRelease {
+    tag_name: String,
+    assets: Vec<GhAsset>,
+}
+
+/// The release asset published for this machine's platform/architecture.
+/// Mirrors Revka's own installer policy: Windows ARM64 runs the x86_64 build
+/// under emulation, so there is deliberately no aarch64 mapping for Windows.
+fn release_asset_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "revka-x86_64-pc-windows-msvc.zip"
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "revka-aarch64-apple-darwin.tar.gz"
+        } else {
+            "revka-x86_64-apple-darwin.tar.gz"
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        "revka-aarch64-unknown-linux-gnu.tar.gz"
+    } else {
+        "revka-x86_64-unknown-linux-gnu.tar.gz"
+    }
+}
+
+fn binary_name() -> &'static str {
+    if cfg!(windows) {
+        "revka.exe"
+    } else {
+        "revka"
+    }
+}
+
+/// Release tag "v2026.6.30" → version "2026.6.30".
+fn tag_version(tag: &str) -> Result<String, String> {
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    if version.is_empty()
+        || !version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        || !version.contains('.')
+    {
+        return Err(format!("invalid Revka release tag: {tag}"));
+    }
+    Ok(version.to_owned())
+}
+
+fn parse_release(text: &str) -> Result<(String, GhRelease), String> {
+    let release: GhRelease =
+        serde_json::from_str(text).map_err(|e| format!("invalid Revka release feed: {e}"))?;
+    let version = tag_version(&release.tag_name)?;
+    let wanted = release_asset_name();
+    if !release.assets.iter().any(|asset| asset.name == wanted) {
+        return Err(format!("Revka {wanted} is not published yet"));
+    }
+    Ok((version, release))
+}
+
+fn fetch_latest_release() -> Result<(String, GhRelease), String> {
+    let response = ureq::get(RELEASE_API_URL)
+        .set("User-Agent", "kumiho-desktop")
+        .set("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|e| format!("could not check Revka releases: {e}"))?;
+    let text = response
+        .into_string()
+        .map_err(|e| format!("could not read Revka release feed: {e}"))?;
+    parse_release(&text)
+}
+
+/// Pull the expected digest for `asset_name` out of a SHA256SUMS manifest.
+/// Lines look like `<hex>  name` or `<hex> *name`; anything else fails closed.
+fn checksum_for(sums: &str, asset_name: &str) -> Option<String> {
+    for line in sums.lines() {
+        let mut fields = line.split_whitespace();
+        let digest = fields.next()?;
+        let filename = fields.next()?.trim_start_matches('*');
+        if filename == asset_name
+            && digest.len() == 64
+            && digest.chars().all(|c| c.is_ascii_hexdigit())
+        {
+            return Some(digest.to_ascii_lowercase());
+        }
+    }
+    None
+}
+
+fn download(url: &str, what: &str) -> Result<Vec<u8>, String> {
+    let response = ureq::get(url)
+        .set("User-Agent", "kumiho-desktop")
+        .timeout(Duration::from_secs(300))
+        .call()
+        .map_err(|e| format!("could not download {what}: {e}"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_DOWNLOAD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("could not read {what}: {e}"))?;
+    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err(format!("{what} is unexpectedly large"));
+    }
+    Ok(bytes)
+}
+
+/// Download the archive and verify it against the release SHA256SUMS before
+/// anything touches disk. No checksum entry is a hard failure, never a warning.
+fn download_release(release: &GhRelease) -> Result<Vec<u8>, String> {
+    let asset_name = release_asset_name();
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == asset_name)
+        .ok_or_else(|| format!("Revka {asset_name} is not published yet"))?;
+    let sums_asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == "SHA256SUMS")
+        .ok_or("Revka release has no SHA256SUMS; refusing to install an unverified binary")?;
+    let sums = String::from_utf8(download(&sums_asset.browser_download_url, "SHA256SUMS")?)
+        .map_err(|_| "SHA256SUMS is not valid UTF-8".to_string())?;
+    let expected = checksum_for(&sums, asset_name)
+        .ok_or("SHA256SUMS has no entry for this platform's archive; refusing to install")?;
+    let bytes = download(&asset.browser_download_url, asset_name)?;
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if actual != expected {
+        return Err(format!(
+            "Revka archive checksum mismatch (got {actual}, expected {expected})"
+        ));
+    }
+    Ok(bytes)
+}
+
+fn extract_binary(archive_bytes: &[u8], staging: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(staging).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive_bytes))
+            .map_err(|e| format!("invalid Revka archive: {e}"))?;
+        let mut names: Vec<String> = (0..archive.len())
+            .filter_map(|index| {
+                archive
+                    .by_index(index)
+                    .ok()
+                    .map(|file| file.name().to_owned())
+            })
+            .collect();
+        names.sort_by_key(|name| (name.matches('/').count(), name.len()));
+        for name in names {
+            if name.ends_with(binary_name()) {
+                let mut source = archive
+                    .by_name(&name)
+                    .map_err(|e| format!("could not reopen {}: {e}", name))?;
+                let destination = staging.join(binary_name());
+                let mut out = fs::File::create(&destination).map_err(|e| e.to_string())?;
+                std::io::copy(&mut source, &mut out).map_err(|e| e.to_string())?;
+                out.sync_all().map_err(|e| e.to_string())?;
+                return Ok(destination);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let decoder = flate2::read::GzDecoder::new(archive_bytes);
+        let mut archive = tar::Archive::new(decoder);
+        let mut candidates: Vec<PathBuf> = archive
+            .entries()
+            .map_err(|e| format!("invalid Revka archive: {e}"))?
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.path().ok().map(Path::into_owned))
+            .filter(|path| path.file_name().is_some_and(|name| name == binary_name()))
+            .collect();
+        candidates.sort_by_key(|path| (path.components().count(), path.to_string_lossy().len()));
+        if let Some(entry_path) = candidates.first() {
+            let mut decoder = flate2::read::GzDecoder::new(archive_bytes);
+            let mut archive = tar::Archive::new(decoder.as_mut());
+            for entry in archive
+                .entries()
+                .map_err(|e| format!("invalid Revka archive: {e}"))?
+            {
+                let mut entry = entry.map_err(|e| e.to_string())?;
+                if entry.path().ok().map(Path::into_owned).as_deref() == Some(entry_path.as_path())
+                {
+                    let destination = staging.join(binary_name());
+                    let mut out = fs::File::create(&destination).map_err(|e| e.to_string())?;
+                    std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+                    out.sync_all().map_err(|e| e.to_string())?;
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&destination, fs::Permissions::from_mode(0o755))
+                        .map_err(|e| e.to_string())?;
+                    return Ok(destination);
+                }
+            }
+        }
+    }
+    Err(format!(
+        "Revka release archive does not contain {}",
+        binary_name()
+    ))
+}
+
+/// Where Desktop manages its own Revka: `~/.kumiho/apps/revka`.
+fn install_root() -> Option<PathBuf> {
+    kumiho_home().map(|home| home.join("apps").join("revka"))
+}
+
+/// A pre-existing install from Revka's own installer scripts.
+fn standalone_binary() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let candidate = home.join(".revka").join("bin").join(binary_name());
+    candidate.exists().then_some(candidate)
+}
+
+fn managed_binary() -> Option<PathBuf> {
+    let candidate = install_root()?.join("bin").join(binary_name());
+    candidate.exists().then_some(candidate)
+}
+
+/// Managed install wins; otherwise reuse the standalone one.
+fn installed_binary() -> Option<PathBuf> {
+    managed_binary().or_else(standalone_binary)
+}
+
+fn installed_version_at(root: &Path) -> Option<String> {
+    let text = fs::read_to_string(root.join("manifest.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .get("version")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn installed_version() -> Option<String> {
+    if let Some(root) = install_root() {
+        if let Some(version) = installed_version_at(&root) {
+            return Some(version);
+        }
+    }
+    standalone_version()
+}
+
+/// Standalone installs carry no Desktop manifest, so ask the binary once per
+/// session. `revka --version` prints "<name> <version>".
+fn standalone_version() -> Option<String> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let binary = standalone_binary()?;
+            let output = command(
+                binary
+                    .to_str()
+                    .expect("standalone binary path is valid UTF-8"),
+            )
+            .arg("--version")
+            .output()
+            .ok()?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            text.split_whitespace().next_back().map(str::to_owned)
+        })
+        .clone()
+}
+
+fn write_manifest(root: &Path, version: &str) -> Result<(), String> {
+    let manifest = serde_json::to_string_pretty(&serde_json::json!({ "version": version }))
+        .expect("serializable");
+    fs::write(root.join("manifest.json"), manifest).map_err(|e| e.to_string())
+}
+
+fn replace_runtime(root: &Path, staged_binary: &Path, version: &str) -> Result<(), String> {
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+    let destination = bin_dir.join(binary_name());
+    let backup = bin_dir.join(format!("{}.previous", binary_name()));
+    let old_manifest = fs::read(root.join("manifest.json")).ok();
+    if backup.exists() {
+        fs::remove_file(&backup).map_err(|e| e.to_string())?;
+    }
+    let had_previous = destination.exists();
+    if had_previous {
+        fs::rename(&destination, &backup)
+            .map_err(|e| format!("could not stage the installed Revka for replacement: {e}"))?;
+    }
+    if let Err(error) = fs::rename(staged_binary, &destination) {
+        if had_previous {
+            let _ = fs::rename(&backup, &destination);
+        }
+        return Err(format!("could not activate the Revka update: {error}"));
+    }
+    if let Err(error) = write_manifest(root, version) {
+        let _ = fs::remove_file(&destination);
+        if had_previous {
+            let _ = fs::rename(&backup, &destination);
+        }
+        match old_manifest {
+            Some(old) => {
+                let _ = fs::write(root.join("manifest.json"), old);
+            }
+            None => {
+                let _ = fs::remove_file(root.join("manifest.json"));
+            }
+        }
+        return Err(format!(
+            "could not record the installed Revka version: {error}"
+        ));
+    }
+    if backup.exists() {
+        fs::remove_file(backup).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn newer_version_available(installed: &str, latest: &str) -> bool {
+    match (
+        semver::Version::parse(installed),
+        semver::Version::parse(latest),
+    ) {
+        (Ok(installed), Ok(latest)) => latest > installed,
+        _ => installed != latest,
+    }
+}
+
+/// One `/health` round trip. True only when the gateway answered HTTP 200.
+fn health_probe() -> bool {
+    let addr: SocketAddr = ([127, 0, 0, 1], REVKA_PORT).into();
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(400)) else {
+        return false;
+    };
+    if stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .is_err()
+    {
+        return false;
+    }
+    let request = concat!(
+        "GET /health HTTP/1.1\r\n",
+        "Host: 127.0.0.1\r\n",
+        "Accept: application/json\r\n",
+        "Connection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    // Read until the header block is complete — the body shape is the
+    // gateway's business, the status line is all Desktop needs.
+    let mut response = Vec::with_capacity(512);
+    let mut chunk = [0_u8; 512];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return health_response_ok(&response),
+            Ok(read) => {
+                response.extend_from_slice(&chunk[..read]);
+                if health_response_ok(&response) {
+                    return true;
+                }
+                if response.len() > 64 * 1024 {
+                    return false;
+                }
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return false;
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+fn health_response_ok(response: &[u8]) -> bool {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&response[..header_end]);
+    headers.lines().next().is_some_and(|status_line| {
+        status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+struct RuntimeStamp {
+    pid: u32,
+    version: String,
+}
+
+fn runtime_stamp_path() -> Option<PathBuf> {
+    Some(install_root()?.join("runtime.json"))
+}
+
+fn write_runtime_stamp(pid: u32, version: &str) {
+    let Some(path) = runtime_stamp_path() else {
+        return;
+    };
+    if let Ok(text) = serde_json::to_string(&RuntimeStamp {
+        pid,
+        version: version.to_owned(),
+    }) {
+        let _ = fs::write(path, text);
+    }
+}
+
+fn read_runtime_stamp() -> Option<RuntimeStamp> {
+    let text = fs::read_to_string(runtime_stamp_path()?).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn clear_runtime_stamp() {
+    if let Some(path) = runtime_stamp_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// `(something healthy is on 42617, which version our stamp says it is)`.
+fn runtime_state() -> (bool, Option<String>) {
+    if !health_probe() {
+        return (false, None);
+    }
+    (true, read_runtime_stamp().map(|stamp| stamp.version))
+}
+
+fn is_stale(installed: Option<&str>, reachable: bool, serving: Option<&str>) -> bool {
+    if !reachable {
+        return false;
+    }
+    let Some(installed) = installed else {
+        return false;
+    };
+    // No stamp means we cannot PROVE the running daemon is ours — treat it as
+    // stale so one restart retires whatever answered.
+    match serving {
+        Some(serving) => serving != installed,
+        None => true,
+    }
+}
+
+fn wait_for_port_closed(timeout: Duration) -> bool {
+    let addr: SocketAddr = ([127, 0, 0, 1], REVKA_PORT).into();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// Kill Revka daemons this Desktop session does not own — leftovers from a
+/// previous session, which `state.revka` knows nothing about.
+fn kill_orphan_revka(force: bool) {
+    let Some(binary) = installed_binary() else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        let _ = (binary, force);
+        let _ = command("taskkill")
+            .args(["/IM", binary_name(), "/T", "/F"])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(path) = binary.to_str() else {
+            return;
+        };
+        let signal = if force { "-KILL" } else { "-TERM" };
+        let _ = command("pkill").args([signal, "-f", path]).output();
+    }
+}
+
+fn terminate_tracked(
+    process: &Mutex<Option<std::process::Child>>,
+    grace: Duration,
+) -> Result<(), String> {
+    let child = process.lock().map_err(|e| e.to_string())?.take();
+    let Some(mut child) = child else {
+        return Ok(());
+    };
+    #[cfg(windows)]
+    {
+        let _ = grace;
+        let pid = child.id().to_string();
+        let _ = command("taskkill")
+            .args(["/PID", &pid, "/T", "/F"])
+            .output();
+    }
+    #[cfg(unix)]
+    {
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                _ => {
+                    let _ = child.kill();
+                    break;
+                }
+            }
+        }
+    }
+    let _ = child.wait();
+    Ok(())
+}
+
+/// Stop every Revka daemon on this machine and do not return until 42617 is free.
+/// Caller must hold [`lifecycle_lock`].
+fn stop_revka(state: &AppState) -> Result<(), String> {
+    terminate_tracked(&state.revka, STOP_GRACE)?;
+    kill_orphan_revka(false);
+    if !wait_for_port_closed(STOP_GRACE) {
+        kill_orphan_revka(true);
+        if !wait_for_port_closed(Duration::from_secs(3)) {
+            return Err(
+                "Revka is still holding 127.0.0.1:42617 — stop it manually and try again".into(),
+            );
+        }
+    }
+    clear_runtime_stamp();
+    Ok(())
+}
+
+/// Serializes every mutation of Revka's lifecycle — stop, binary swap, spawn.
+fn lifecycle_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+    state.revka_start.lock().map_err(|e| e.to_string())
+}
+
+/// Caller must hold [`lifecycle_lock`].
+fn start_revka(state: &AppState) -> Result<String, String> {
+    let (reachable, serving) = runtime_state();
+    if reachable {
+        if !is_stale(installed_version().as_deref(), true, serving.as_deref()) {
+            return Ok("Revka already serving on 42617".into());
+        }
+        stop_revka(state)?;
+    }
+
+    {
+        let mut tracked = state.revka.lock().map_err(|e| e.to_string())?;
+        match tracked.as_mut().map(std::process::Child::try_wait) {
+            Some(Ok(None)) => return Ok("Revka is already starting on 42617".into()),
+            Some(_) => *tracked = None,
+            None => {}
+        }
+    }
+
+    let addr: SocketAddr = ([127, 0, 0, 1], REVKA_PORT).into();
+    if TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok() {
+        return Err("port 42617 is occupied by a process that is not Revka".into());
+    }
+    let binary = installed_binary().ok_or("Revka is not installed yet")?;
+    let root = install_root().ok_or("no home directory")?;
+    fs::create_dir_all(root.join("logs")).map_err(|e| e.to_string())?;
+
+    let log_path = root.join("logs").join("revka.log");
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| e.to_string())?;
+    let stderr = stdout.try_clone().map_err(|e| e.to_string())?;
+
+    let child = command(binary.to_str().ok_or("invalid Revka install path")?)
+        .args([
+            "daemon",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &REVKA_PORT.to_string(),
+        ])
+        .current_dir(&root)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    write_runtime_stamp(child.id(), &installed_version().unwrap_or_default());
+    *state.revka.lock().map_err(|e| e.to_string())? = Some(child);
+    Ok(format!("Revka starting on {REVKA_PORT}"))
+}
+
+/// App shutdown: retire the daemon we own so it does not hold the binary lock
+/// the next session's update has to fight.
+pub fn kill_tracked_revka(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let _ = terminate_tracked(&state.revka, EXIT_GRACE);
+    clear_runtime_stamp();
+}
+
+#[derive(Serialize)]
+pub struct RevkaStatus {
+    pub reachable: bool,
+    pub port: u16,
+    /// `true` when the binary comes from ~/.kumiho/apps/revka rather than a
+    /// pre-existing standalone install.
+    pub managed: bool,
+    pub installed: bool,
+    pub version: Option<String>,
+    /// The build answering on 42617 according to our stamp — None for daemons
+    /// Desktop did not spawn.
+    pub serving_version: Option<String>,
+    pub stale: bool,
+}
+
+#[derive(Serialize)]
+pub struct RevkaUpdateInfo {
+    pub installed_version: Option<String>,
+    pub latest_version: String,
+    pub update_available: bool,
+}
+
+#[tauri::command]
+pub fn revka_status() -> RevkaStatus {
+    let version = installed_version();
+    let (reachable, serving_version) = runtime_state();
+    RevkaStatus {
+        reachable,
+        port: REVKA_PORT,
+        managed: managed_binary().is_some(),
+        installed: installed_binary().is_some(),
+        stale: is_stale(version.as_deref(), reachable, serving_version.as_deref()),
+        serving_version,
+        version,
+    }
+}
+
+#[tauri::command]
+pub fn revka_check_update() -> Result<RevkaUpdateInfo, String> {
+    let installed_version = installed_version();
+    let (latest_version, _) = fetch_latest_release()?;
+    let update_available = installed_version
+        .as_deref()
+        .map(|installed| newer_version_available(installed, &latest_version))
+        .unwrap_or(true);
+    Ok(RevkaUpdateInfo {
+        installed_version,
+        latest_version,
+        update_available,
+    })
+}
+
+/// Download the latest prebuilt Revka, verify it against the release
+/// checksums, swap it in, and bring the daemon back up. Used for both first
+/// installs and updates — there is no bundled payload to distinguish.
+#[tauri::command]
+pub fn revka_install(state: State<AppState>) -> Result<String, String> {
+    let app: &AppState = &state;
+    let (latest_version, release) = fetch_latest_release()?;
+    {
+        let _lifecycle = lifecycle_lock(app)?;
+        stop_revka(app)?;
+    }
+    let bytes = download_release(&release)?;
+    let root = install_root().ok_or("no home directory")?;
+    fs::create_dir_all(root.join("logs")).map_err(|e| e.to_string())?;
+    let staging = root.join(format!(
+        ".update-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    ));
+    let result = (|| {
+        let staged_binary = extract_binary(&bytes, &staging)?;
+        // Held across the swap so no start can slip between stop and activate.
+        let _lifecycle = lifecycle_lock(app)?;
+        replace_runtime(&root, &staged_binary, &latest_version)?;
+        Ok(match start_revka(app) {
+            Ok(_) => format!("Revka {latest_version} installed and restarted"),
+            Err(error) => {
+                format!("Revka {latest_version} installed, but it did not restart: {error}")
+            }
+        })
+    })();
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+#[tauri::command]
+pub fn revka_start(state: State<AppState>) -> Result<String, String> {
+    let _lifecycle = lifecycle_lock(&state)?;
+    start_revka(&state)
+}
+
+#[tauri::command]
+pub fn revka_stop(state: State<AppState>) -> Result<String, String> {
+    let _lifecycle = lifecycle_lock(&state)?;
+    stop_revka(&state)?;
+    Ok("Revka stopped".into())
+}
+
+#[derive(Serialize)]
+pub struct OnboardStarted {
+    /// Human-readable shell name shown in the terminal header.
+    pub shell: String,
+}
+
+/// Open the embedded onboarding terminal: a real PTY running the host shell,
+/// with `"<revka>" onboard` typed into it. The wizard is fully interactive —
+/// keystrokes flow back through revka_pty_write.
+#[tauri::command]
+pub fn revka_onboard_start(
+    state: State<AppState>,
+    on_data: tauri::ipc::Channel<crate::pty::PtyEvent>,
+) -> Result<OnboardStarted, String> {
+    let binary = installed_binary().ok_or("Revka is not installed yet")?;
+    let choice = crate::pty::spawn_session(&state, &binary, on_data)?;
+    // Typed immediately after spawn: tty input buffers hold it until the
+    // interactive shell is ready to read, so no timing guesswork is needed.
+    crate::pty::type_command(&state, &format!("\"{}\" onboard", binary.display()))?;
+    Ok(OnboardStarted {
+        shell: choice.label,
+    })
+}
+
+#[tauri::command]
+pub fn revka_pty_write(state: State<AppState>, data: String) -> Result<(), String> {
+    crate::pty::write_input(&state, &data)
+}
+
+#[tauri::command]
+pub fn revka_pty_resize(state: State<AppState>, rows: u16, cols: u16) -> Result<(), String> {
+    crate::pty::resize(&state, rows, cols)
+}
+
+#[tauri::command]
+pub fn revka_pty_stop(state: State<AppState>) -> Result<(), String> {
+    crate::pty::stop_session(&state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        checksum_for, health_response_ok, installed_version_at, is_stale, newer_version_available,
+        parse_release, release_asset_name, replace_runtime, tag_version,
+    };
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn sample_release(asset: &str) -> String {
+        format!(
+            r#"{{"tag_name":"v2026.6.30","assets":[
+                {{"name":"install.sh","browser_download_url":"https://github.com/KumihoIO/Revka/releases/download/v2026.6.30/install.sh"}},
+                {{"name":"{asset}","browser_download_url":"https://github.com/KumihoIO/Revka/releases/download/v2026.6.30/{asset}"}},
+                {{"name":"SHA256SUMS","browser_download_url":"https://github.com/KumihoIO/Revka/releases/download/v2026.6.30/SHA256SUMS"}}]}}"#
+        )
+    }
+
+    #[test]
+    fn every_platform_maps_to_a_published_style_asset() {
+        assert_eq!(
+            release_asset_name(),
+            if cfg!(target_os = "windows") {
+                "revka-x86_64-pc-windows-msvc.zip"
+            } else if cfg!(target_os = "macos") {
+                if cfg!(target_arch = "aarch64") {
+                    "revka-aarch64-apple-darwin.tar.gz"
+                } else {
+                    "revka-x86_64-apple-darwin.tar.gz"
+                }
+            } else if cfg!(target_arch = "aarch64") {
+                "revka-aarch64-unknown-linux-gnu.tar.gz"
+            } else {
+                "revka-x86_64-unknown-linux-gnu.tar.gz"
+            }
+        );
+    }
+
+    #[test]
+    fn release_feed_selects_this_platforms_archive() {
+        let (version, release) =
+            parse_release(&sample_release(release_asset_name())).expect("valid release");
+        assert_eq!(version, "2026.6.30");
+        assert!(release
+            .assets
+            .iter()
+            .any(|asset| asset.name == release_asset_name()));
+    }
+
+    #[test]
+    fn missing_platform_archive_fails_closed() {
+        let (version, _) =
+            parse_release(&sample_release(release_asset_name())).expect("valid release");
+        assert_eq!(version, "2026.6.30");
+        assert!(parse_release(&sample_release("revka-s390x-unknown-linux-gnu.tar.gz")).is_err());
+    }
+
+    #[test]
+    fn tags_strip_the_v_prefix_and_reject_garbage() {
+        assert_eq!(tag_version("v2026.6.30"), Ok("2026.6.30".into()));
+        assert_eq!(tag_version("2026.6.30"), Ok("2026.6.30".into()));
+        assert!(tag_version("").is_err());
+        assert!(tag_version("vabc").is_err());
+        assert!(tag_version("v2026").is_err());
+    }
+
+    #[test]
+    fn sums_lookup_handles_both_text_and_binary_markers() {
+        let sums = "3c2aee5a59f975a96035c2d05f0f2d4d90096a1cd403dc1d77fa6044742f3fd2  revka-x86_64-pc-windows-msvc.zip\n\
+                    77a444267ba952b8385d023f6ee3e11a53704e9ddad9663edf386bebaaf2325f *revka-x86_64-unknown-linux-gnu.tar.gz\n";
+        assert_eq!(
+            checksum_for(sums, "revka-x86_64-pc-windows-msvc.zip").as_deref(),
+            Some("3c2aee5a59f975a96035c2d05f0f2d4d90096a1cd403dc1d77fa6044742f3fd2")
+        );
+        assert_eq!(
+            checksum_for(sums, "revka-x86_64-unknown-linux-gnu.tar.gz").as_deref(),
+            Some("77a444267ba952b8385d023f6ee3e11a53704e9ddad9663edf386bebaaf2325f")
+        );
+        assert_eq!(checksum_for(sums, "install.sh"), None);
+        assert_eq!(checksum_for("", "anything"), None);
+    }
+
+    #[test]
+    fn calver_comparison_understands_newer_releases() {
+        assert!(newer_version_available("2026.6.30", "2027.1.5"));
+        assert!(!newer_version_available("2026.6.30", "2026.6.30"));
+        assert!(!newer_version_available("2026.12.31", "2026.6.30"));
+    }
+
+    #[test]
+    fn a_daemon_serving_a_different_build_than_installed_is_stale() {
+        assert!(is_stale(Some("2026.6.30"), true, Some("2026.1.1")));
+        assert!(!is_stale(Some("2026.6.30"), true, Some("2026.6.30")));
+        assert!(!is_stale(Some("2026.6.30"), false, None));
+        // Unknown serving version cannot be proven current, so restart it.
+        assert!(is_stale(Some("2026.6.30"), true, None));
+        assert!(!is_stale(None, true, None));
+    }
+
+    #[test]
+    fn accepts_a_200_health_header_block_without_waiting_for_eof() {
+        assert!(health_response_ok(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}"
+        ));
+        assert!(!health_response_ok(
+            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 2\r\n\r\n{}"
+        ));
+        assert!(!health_response_ok(b"HTTP/1.1 200 OK\r\n")); // headers incomplete
+    }
+
+    #[test]
+    fn runtime_replacement_updates_binary_and_manifest_together() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kumiho-desktop-revka-replace-{}-{unique}",
+            std::process::id()
+        ));
+        let bin = root.join("bin");
+        let fs_bin = bin.join(if cfg!(windows) { "revka.exe" } else { "revka" });
+        fs::create_dir_all(&bin).expect("create bin");
+        fs::write(&fs_bin, b"old").expect("write old binary");
+        write_manifest_helper(&root, "2026.1.1");
+
+        let staged = root.join("staging");
+        fs::create_dir_all(&staged).expect("create staging");
+        fs::write(staged.join(fs_bin.file_name().unwrap()), b"new").expect("write staged binary");
+
+        replace_runtime(
+            &root,
+            &staged.join(fs_bin.file_name().unwrap()),
+            "2026.6.30",
+        )
+        .expect("replace runtime");
+
+        assert_eq!(fs::read(&fs_bin).expect("read binary"), b"new");
+        assert_eq!(installed_version_at(&root).as_deref(), Some("2026.6.30"));
+        fs::remove_dir_all(root).expect("remove test install root");
+    }
+
+    fn write_manifest_helper(root: &std::path::Path, version: &str) {
+        fs::write(
+            root.join("manifest.json"),
+            format!(r#"{{"version":"{version}"}}"#),
+        )
+        .expect("write old manifest");
+    }
+}

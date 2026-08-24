@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Kumiho Desktop</title>
 <link rel="icon" type="image/png" href="./assets/kumiho-fox.png" />
+<link rel="stylesheet" href="./assets/vendor/xterm.min.css" />
 <style>
   :root {
     --ink:#0c0c0e; --surface:#131316; --line:rgba(255,255,255,.10); --line-soft:rgba(255,255,255,.05);
@@ -100,6 +101,13 @@
   iframe.product-pane.active{display:block!important;}
   .stage .empty.product-pane.active:not(.hide){display:flex!important;}
   .miho-mark{width:72px;height:72px;display:grid;place-items:center;border-radius:18px;background:radial-gradient(circle at 50% 20%,rgba(255,154,60,.18),rgba(239,76,40,.05));box-shadow:0 16px 40px rgba(239,76,40,.18);overflow:hidden}.miho-mark img{width:100%;height:100%;object-fit:contain;}
+
+  /* onboarding terminal modal */
+  .modal.term-modal{width:min(880px,94vw);height:min(660px,88vh);display:flex;flex-direction:column;padding:0;}
+  .term-head{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line);}
+  .term-host{flex:1;min-height:0;padding:10px 14px;background:#050506;overflow:hidden;}
+  .term-host .xterm,.term-host .xterm-viewport{max-height:100%;}
+  .term-hint{padding:10px 20px;border-top:1px solid var(--line);font-size:12px;color:var(--faint);}
   .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:60;font-family:var(--mono);font-size:12px;
     background:#131316;border:1px solid var(--line);border-radius:10px;padding:9px 14px;color:var(--dim);opacity:0;transition:opacity .2s;pointer-events:none;}
   .toast.show{opacity:1;} .toast.bad{color:var(--bad);border-color:rgba(248,113,113,.35);}
@@ -175,11 +183,13 @@
     <div class="brand"><img class="brand-logo" src="./assets/kumiho-logo-white.png" alt="Kumiho"><span class="brand-divider"></span><span class="sub" id="app-ver"></span><span class="sub" id="brand-sub">—</span></div>
     <div class="products" role="tablist" aria-label="Kumiho applications">
       <button id="product-brain" class="active" role="tab" aria-selected="true" onclick="showProduct('brain')">Memory</button>
+      <button id="product-revka" role="tab" aria-selected="false" onclick="showProduct('revka')">Revka</button>
       <button id="product-miho" role="tab" aria-selected="false" onclick="showProduct('miho')">9miho</button>
     </div>
     <div class="stat">
       <span><span class="dot" id="dot-server"></span> Server</span>
       <span><span class="dot" id="dot-brain"></span> Memory</span>
+      <span><span class="dot" id="dot-revka"></span> Revka</span>
       <span><span class="dot" id="dot-miho"></span> 9miho</span>
     </div>
     <div class="grow"></div>
@@ -198,6 +208,13 @@
       <p class="dim" id="miho-empty-copy" style="margin:0;max-width:500px">Install the bundled runtime, then create against your selected Kumiho connection.</p>
       <button class="primary" id="miho-install-btn" onclick="installMiho()">Install 9miho</button>
     </div>
+    <div class="empty product-pane" id="revka-empty">
+      <div class="miho-mark"><img src="./assets/kumiho-fox.png" alt="Kumiho fox"></div>
+      <h3>Revka agent runtime</h3>
+      <p class="dim" id="revka-empty-copy" style="margin:0;max-width:520px">Install the prebuilt runtime from official Revka releases, then finish onboarding in the embedded terminal.</p>
+      <button class="primary" id="revka-install-btn" onclick="installOrUpdateRevka()">Install Revka</button>
+    </div>
+    <iframe class="product-pane" id="revka-frame" title="Revka Dashboard"></iframe>
     <iframe class="product-pane" id="miho-frame" title="9miho Canvas"></iframe>
   </div>
 </div>
@@ -276,6 +293,12 @@
             <div class="app-actions"><button id="memory-check-btn" onclick="checkMemoryUpdates(true)">Check update</button><button class="primary" id="memory-update-btn" onclick="updateMemory()" style="display:none">Update</button><button onclick="stab('agents')">Manage agents</button></div>
           </div>
           <div class="card app-card">
+            <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">Revka</div><div class="faint" id="revka-version">Version —</div></div><span class="pill" id="revka-app-pill">…</span></div>
+            <div class="app-meta" id="revka-version-detail">Runtime · 127.0.0.1:42617</div>
+            <div class="app-update-copy" id="revka-update-copy">Checks official prebuilt Revka releases (SHA-256 verified).</div>
+            <div class="app-actions"><button id="revka-check-btn" onclick="checkRevkaUpdate(true)">Check update</button><button class="primary" id="revka-app-install" onclick="installOrUpdateRevka()">Install</button><button onclick="startRevka(true)">Restart</button><button onclick="openOnboardTerminal()">Onboard</button></div>
+          </div>
+          <div class="card app-card">
             <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">9miho</div><div class="faint" id="miho-version">Version —</div></div><span class="pill" id="miho-app-pill">…</span></div>
             <div class="app-meta" id="miho-version-detail">Runtime · 127.0.0.1:9999</div>
             <div class="app-update-copy" id="miho-update-copy">Check signed 9miho runtime releases.</div>
@@ -306,9 +329,26 @@
   </div>
 </div>
 
+<!-- ===================== ONBOARDING TERMINAL ===================== -->
+<div class="overlay" id="onboard-term">
+  <div class="modal term-modal" role="dialog" aria-modal="true" aria-labelledby="term-title">
+    <div class="term-head">
+      <div class="grow">
+        <div class="kicker">Revka onboarding</div>
+        <h2 id="term-title" style="margin:2px 0 0;font-size:18px">Setup wizard <span class="faint mono" style="font-size:12px" id="term-shell"></span></h2>
+      </div>
+      <button class="icon ghost" aria-label="Close onboarding terminal" onclick="closeOnboardTerminal()">✕</button>
+    </div>
+    <div class="term-host" id="term-host"></div>
+    <div class="term-hint">The wizard runs in your shell inside Kumiho Desktop. Closing this dialog stops it — reopen Revka → Onboard any time.</div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="./server-health.js"></script>
+<script src="./assets/vendor/xterm.js"></script>
+<script src="./assets/vendor/addon-fit.js"></script>
 <script>
   const T = window.__TAURI__;
   const invoke = (c,a) => T.core.invoke(c,a);
@@ -575,6 +615,21 @@
         $('brain-empty').classList.toggle('hide', b.reachable);
       }
     }catch(e){}
+    try{ const r=await invoke('revka_status');
+      if(refreshIsCurrent()){
+        $('dot-revka').className='dot '+(r.reachable?'on':'off');
+        $('revka-empty').classList.toggle('hide', r.reachable);
+        const button=$('revka-install-btn'), copy=$('revka-empty-copy');
+        if(button){
+          button.style.display=r.reachable?'none':'inline-flex';
+          const updateReady=r.stale||!!(REVKA_UPDATE?.update_available);
+          button.textContent=!r.installed?'Install Revka':(updateReady?'Update & start Revka':'Start Revka');
+          if(!r.reachable) copy.textContent=!r.installed
+            ? 'Installs the prebuilt runtime from official Revka releases (checksum-verified), then opens onboarding right here.'
+            : (updateReady?'A newer Revka release is ready to install.':'Revka is installed and ready to start.');
+        }
+      }
+    }catch(e){}
     try{ const m=await invoke('miho_status');
       if(refreshIsCurrent()){
         mihoStatus=m;
@@ -708,24 +763,33 @@
     $('up-cta').onclick=()=>openUrl(i.signup_url);
   }
 
-  // ---------- product shell: Memory + 9miho ----------
+  // ---------- product shell: Memory + Revka + 9miho ----------
   let ACTIVE_PRODUCT='brain';
   let MIHO_UPDATE=null;
   let MIHO_CHECK_ERROR=null;
   let MEMORY_STATUS=null;
+  let REVKA_UPDATE=null;
   function activateProductPane(name){
     ACTIVE_PRODUCT=name;
     localStorage.setItem('kumiho.activeProduct',name);
-    ['brain','miho'].forEach(product=>{
+    ['brain','revka','miho'].forEach(product=>{
       $('product-'+product).classList.toggle('active',product===name);
       $('product-'+product).setAttribute('aria-selected',String(product===name));
       $(''+product+'-frame').classList.toggle('active',product===name);
-      $(''+product+'-empty').classList.toggle('active',product===name);
+      $(''+product+'-empty')?.classList.toggle('active',product===name);
     });
   }
   async function showProduct(name){
     activateProductPane(name);
     if(name==='brain') return;
+    if(name==='revka'){
+      let status; try{ status=await invoke('revka_status'); }catch(e){ toast(String(e),true); return; }
+      await refreshStatus();
+      if(status.reachable&&!status.stale){ loadRevka(); return; }
+      if(status.stale){ await startRevka(true); return; }
+      if(status.installed) await startRevka(false);
+      return;   // nothing installed: the empty state stays visible
+    }
     let status; try{ status=await invoke('miho_status'); }catch(e){ toast(String(e),true); return; }
     await refreshStatus();
     if(status.reachable&&!status.stale){ loadMiho(); return; }
@@ -837,6 +901,100 @@
     }catch(e){ toast('9miho mode switch failed: '+String(e),true); return false; }
   }
 
+  // ---------- Revka ----------
+  function loadRevka(){ $('revka-frame').src='http://127.0.0.1:42617/?t='+Date.now(); }
+  async function checkRevkaUpdate(manual){
+    const button=$('revka-check-btn'); if(button) button.textContent='Checking…';
+    try{
+      REVKA_UPDATE=await invoke('revka_check_update');
+      if(manual) toast(REVKA_UPDATE.update_available?'Revka '+REVKA_UPDATE.latest_version+' is available':'Revka is up to date ('+REVKA_UPDATE.latest_version+')');
+      refreshStatus();
+      return REVKA_UPDATE;
+    }catch(e){
+      REVKA_UPDATE=null;
+      if(manual) toast('Revka update check failed: '+String(e),true);
+      return null;
+    }finally{ if(button) button.textContent='Check update'; }
+  }
+  let REVKA_START_IN_FLIGHT=null;
+  async function startRevka(force){
+    if(UPDATING) return false;
+    // Same coalescing contract as 9miho: concurrent plain starts join; a forced
+    // restart is a real user request and never joins an in-flight one.
+    if(!force && REVKA_START_IN_FLIGHT) return REVKA_START_IN_FLIGHT;
+    const run=startRevkaOnce(force);
+    if(!force){ REVKA_START_IN_FLIGHT=run; run.finally(()=>{ if(REVKA_START_IN_FLIGHT===run) REVKA_START_IN_FLIGHT=null; }); }
+    return run;
+  }
+  async function startRevkaOnce(force){
+    if(force){ try{ await invoke('revka_stop'); }catch(e){} await new Promise(r=>setTimeout(r,350)); }
+    toast(force?'restarting Revka…':'starting Revka…');
+    try{ await invoke('revka_start'); }catch(e){ toast(String(e),true); return false; }
+    const up=await waitFor(()=>invoke('revka_status').then(s=>s.reachable&&!s.stale),40000);
+    if(up){ loadRevka(); $('revka-empty').classList.add('hide'); }
+    else toast('Revka did not start on 42617 — see ~/.kumiho/apps/revka/logs/revka.log',true);
+    refreshStatus();
+    return up;
+  }
+  async function installOrUpdateRevka(){
+    const button=$('revka-install-btn'), appButton=$('revka-app-install'); if(button) button.disabled=true; if(appButton) appButton.disabled=true;
+    let wasInstalled=false;
+    try{ wasInstalled=(await invoke('revka_status')).installed; }catch(e){}
+    if(wasInstalled && !REVKA_UPDATE?.update_available && !window.confirm('Download and reinstall the latest Revka release? Your configuration is kept.')){
+      if(button) button.disabled=false; if(appButton) appButton.disabled=false; return;
+    }
+    setLog('apps','downloading and verifying the signed Revka release…');
+    toast('installing Revka…');
+    try{
+      const result=await invoke('revka_install');
+      setLog('apps','✓ '+result);
+      if(!wasInstalled) await openOnboardTerminal();   // first install → straight into onboarding
+    }catch(e){
+      setLog('apps',String(e),true); toast(String(e),true);
+    }
+    finally{ if(button) button.disabled=false; if(appButton) appButton.disabled=false; refreshStatus(); refreshApps(); }
+  }
+
+  // ---------- embedded onboarding terminal (xterm.js + native PTY) ----------
+  let TERM=null, TERM_FIT=null, PTY_OPEN=false;
+  function initTerm(){
+    if(TERM){ TERM_FIT.fit(); return; }
+    TERM=new window.Terminal({
+      fontFamily:"'JetBrains Mono',ui-monospace,Consolas,monospace", fontSize:13,
+      theme:{ background:'#050506', foreground:'#f4f4f5', cursor:'#ef4c28' },
+      cursorBlink:true, allowProposedApi:true
+    });
+    TERM_FIT=new window.FitAddon.FitAddon();
+    TERM.loadAddon(TERM_FIT);
+    TERM.open($('term-host'));
+    TERM.onData(data=>invoke('revka_pty_write',{data}).catch(()=>{}));
+    TERM.onResize(({cols,rows})=>invoke('revka_pty_resize',{cols,rows}).catch(()=>{}));
+    new ResizeObserver(()=>{ try{ TERM_FIT.fit(); }catch(e){} }).observe($('term-host'));
+  }
+  async function openOnboardTerminal(){
+    $('onboard-term').classList.add('show');
+    initTerm();
+    if(PTY_OPEN) return;
+    const channel=new T.ipc.Channel();
+    channel.onmessage=(message)=>{
+      if(message.type==='exit'){ PTY_OPEN=false; TERM.writeln('\r\n\x1b[2m[session ended]\x1b[0m'); return; }
+      TERM.write(message.data);
+    };
+    try{
+      const started=await invoke('revka_onboard_start',{onData:channel});
+      PTY_OPEN=true;
+      $('term-shell').textContent='· '+started.shell;
+      TERM_FIT.fit();
+    }catch(e){
+      TERM.writeln('\x1b[31m'+String(e)+'\x1b[0m');
+      toast(String(e),true);
+    }
+  }
+  async function closeOnboardTerminal(){
+    $('onboard-term').classList.remove('show');
+    if(PTY_OPEN){ PTY_OPEN=false; try{ await invoke('revka_pty_stop'); }catch(e){} }
+  }
+
   // ---------- Memory ----------
   function loadBrain(){ $('brain-frame').src='http://127.0.0.1:8090/?t='+Date.now(); }
   async function startBrain(){
@@ -887,10 +1045,12 @@
   let STATUS_TIMER=null;
   function enterApp(){ closeSettings(true); $('setup').classList.remove('show'); $('app').style.display='flex';
     $('brand-sub').textContent = MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
-    activateProductPane(localStorage.getItem('kumiho.activeProduct')==='miho'?'miho':'brain');
+    const saved=localStorage.getItem('kumiho.activeProduct');
+    activateProductPane(['brain','revka','miho'].includes(saved)?saved:'brain');
     refreshStatus();
     bootInfraThenBrain();   // optional CE infra autostart, then a fresh mode-correct Memory view
     if(!STATUS_TIMER) STATUS_TIMER=setInterval(refreshStatus, 5000);
+    if(ACTIVE_PRODUCT==='revka') showProduct('revka');
     if(ACTIVE_PRODUCT==='miho') showProduct('miho');
   }
 
@@ -993,6 +1153,16 @@
       if(isCurrent()) renderMemoryStatus(memoryEngine,false);
     }catch(e){ if(isCurrent()) pill($('memory-plugin-pill'),false,'unavailable'); }
     try{
+      const revka=await invoke('revka_status');
+      if(!isCurrent()) return;
+      pill($('revka-app-pill'),revka.reachable,revka.reachable?'running':(revka.installed?'stopped':'not installed'));
+      $('revka-version').textContent=revka.version
+        ?'Version '+revka.version+(revka.stale?' installed · serving '+(revka.serving_version||'an older build'):'')
+        :'Not installed';
+      $('revka-version-detail').textContent=(revka.managed?'Runtime · ~/.kumiho/apps/revka':'Runtime · standalone ~/.revka')+' · 127.0.0.1:'+revka.port;
+      $('revka-app-install').textContent=!revka.installed?'Install':((REVKA_UPDATE?.update_available||revka.stale)?'Update':'Reinstall');
+    }catch(e){ if(isCurrent()){ pill($('revka-app-pill'),false,'unavailable'); setLog('apps',String(e),true); } }
+    try{
       const miho=mihoStatus||await invoke('miho_status');
       if(!isCurrent()) return;
       pill($('miho-app-pill'),miho.reachable&&!miho.stale,miho.stale?'restart required':(miho.reachable?'running':(miho.installed?'stopped':'not installed')));
@@ -1013,6 +1183,7 @@
     checkUpdate(false);   // silent check; surfaces an Update button if one's out
     checkMihoUpdate(false);
     checkMemoryUpdates(false);
+    checkRevkaUpdate(false);
   });
 </script>
 </body>
