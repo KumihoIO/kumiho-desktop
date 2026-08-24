@@ -51,10 +51,15 @@ impl PtySession {
     }
 }
 
-/// Which shell the onboarding terminal will run. The label is shown in the UI.
+/// Which shell the onboarding terminal will run. The label is shown in the UI;
+/// the PowerShell flag decides how a quoted command must be invoked.
 #[derive(Serialize)]
 pub struct ShellChoice {
     pub label: String,
+    /// PowerShell parses `"exe" args` in expression mode and rejects it —
+    /// such commands need the `&` call operator.
+    #[serde(skip)]
+    pub power_shell: bool,
 }
 
 fn find_in_path(program: &str) -> Option<PathBuf> {
@@ -64,12 +69,13 @@ fn find_in_path(program: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn windows_shell() -> Option<(String, String, Vec<String>)> {
-    if let Some(pwsh) = find_in_path("pwsh.exe").or_else(|| find_in_path("pwsh")) {
+fn windows_shell() -> Option<(String, String, Vec<String>, bool)> {
+    if let Some(pwsh) = find_in_path("pwsh.exe") {
         return Some((
             "PowerShell 7".into(),
             pwsh.to_string_lossy().into_owned(),
             vec!["-NoLogo".into()],
+            true,
         ));
     }
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
@@ -83,20 +89,22 @@ fn windows_shell() -> Option<(String, String, Vec<String>)> {
             "Windows PowerShell".into(),
             powershell.to_string_lossy().into_owned(),
             vec!["-NoLogo".into()],
+            true,
         ));
     }
     if let Some(comspec) = std::env::var_os("ComSpec") {
-        return Some((
-            "Command Prompt".into(),
-            comspec.to_string_lossy().into_owned(),
-            Vec::new(),
-        ));
+        // Some wrappers store ComSpec with surrounding quotes; strip them so
+        // the path actually resolves.
+        let trimmed = comspec.to_string_lossy().trim_matches('"').to_string();
+        if Path::new(&trimmed).is_file() {
+            return Some(("Command Prompt".into(), trimmed, Vec::new(), false));
+        }
     }
     None
 }
 
 #[cfg(not(windows))]
-fn unix_shell() -> Option<(String, String, Vec<String>)> {
+fn unix_shell() -> Option<(String, String, Vec<String>, bool)> {
     if let Some(shell) = std::env::var_os("SHELL") {
         let shell = PathBuf::from(shell);
         if shell.is_file() {
@@ -104,7 +112,12 @@ fn unix_shell() -> Option<(String, String, Vec<String>)> {
                 .file_stem()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "shell".into());
-            return Some((label, shell.to_string_lossy().into_owned(), Vec::new()));
+            return Some((
+                label,
+                shell.to_string_lossy().into_owned(),
+                Vec::new(),
+                false,
+            ));
         }
     }
     for candidate in ["/bin/bash", "/bin/sh"] {
@@ -113,13 +126,13 @@ fn unix_shell() -> Option<(String, String, Vec<String>)> {
                 .file_stem()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "shell".into());
-            return Some((label, candidate.into(), Vec::new()));
+            return Some((label, candidate.into(), Vec::new(), false));
         }
     }
     None
 }
 
-fn detect_shell() -> Result<(String, String, Vec<String>), String> {
+fn detect_shell() -> Result<(String, String, Vec<String>, bool), String> {
     #[cfg(windows)]
     {
         windows_shell().ok_or_else(|| "no usable shell found on this machine".to_string())
@@ -184,7 +197,7 @@ pub fn spawn_session(
     on_data: Channel<PtyEvent>,
 ) -> Result<ShellChoice, String> {
     stop_session(state)?;
-    let (label, program, args) = detect_shell()?;
+    let (label, program, args, power_shell) = detect_shell()?;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -220,14 +233,26 @@ pub fn spawn_session(
     // Nothing else needs the slave side; keeping it open would block EOFs.
     drop(pair.slave);
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("could not read from the terminal: {e}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("could not write to the terminal: {e}"))?;
+    // From here on the child exists — any failure must kill it explicitly or
+    // an unregistered shell outlives the session.
+    let mut reader = match pair.master.try_clone_reader() {
+        Ok(reader) => reader,
+        Err(e) => {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("could not read from the terminal: {e}"));
+        }
+    };
+    let writer = match pair.master.take_writer() {
+        Ok(writer) => writer,
+        Err(e) => {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("could not write to the terminal: {e}"));
+        }
+    };
 
     std::thread::spawn(move || {
         let mut feeder = Utf8Feeder::new();
@@ -246,12 +271,17 @@ pub fn spawn_session(
         let _ = on_data.send(PtyEvent::Exit);
     });
 
-    *state.revka_pty.lock().map_err(|e| e.to_string())? = Some(PtySession {
-        writer,
-        master: pair.master,
-        child,
+    let registration = state.revka_pty.lock().map(|mut guard| {
+        *guard = Some(PtySession {
+            writer,
+            master: pair.master,
+            child,
+        });
     });
-    Ok(ShellChoice { label })
+    if let Err(e) = registration {
+        return Err(e.to_string());
+    }
+    Ok(ShellChoice { label, power_shell })
 }
 
 /// Type the quoted command into the running shell, as if the user typed it.

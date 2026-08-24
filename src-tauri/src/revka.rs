@@ -67,12 +67,18 @@ fn binary_name() -> &'static str {
     }
 }
 
-/// Release tag "v2026.6.30" → version "2026.6.30".
+/// Release tag "v2026.6.30" → version "2026.6.30". A prerelease/build suffix
+/// ("-rc1") is preserved so comparisons still work via the string fallback.
 fn tag_version(tag: &str) -> Result<String, String> {
     let version = tag.strip_prefix('v').unwrap_or(tag);
-    if version.is_empty()
-        || !version.chars().all(|c| c.is_ascii_digit() || c == '.')
-        || !version.contains('.')
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    if core.is_empty()
+        || !core.chars().all(|c| c.is_ascii_digit() || c == '.')
+        || !core.contains('.')
+        || core.split('.').any(|segment| segment.is_empty())
+        || !version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
     {
         return Err(format!("invalid Revka release tag: {tag}"));
     }
@@ -121,6 +127,11 @@ fn checksum_for(sums: &str, asset_name: &str) -> Option<String> {
 }
 
 fn download(url: &str, what: &str) -> Result<Vec<u8>, String> {
+    // Pin the host and repository path exactly like the 9miho feed does: the
+    // release JSON alone must never choose where bytes come from.
+    if !url.starts_with("https://github.com/KumihoIO/Revka/releases/") {
+        return Err("Revka download URL is not an official Kumiho release".into());
+    }
     let response = ureq::get(url)
         .set("User-Agent", "kumiho-desktop")
         .timeout(Duration::from_secs(300))
@@ -182,7 +193,12 @@ fn extract_binary(archive_bytes: &[u8], staging: &Path) -> Result<PathBuf, Strin
             .collect();
         names.sort_by_key(|name| (name.matches('/').count(), name.len()));
         for name in names {
-            if name.ends_with(binary_name()) {
+            // Match the final path segment only — `ends_with` would also
+            // accept "xrevka.exe" or "evil/../revka.exe".
+            if Path::new(&name)
+                .file_name()
+                .is_some_and(|n| n == binary_name())
+            {
                 let mut source = archive
                     .by_name(&name)
                     .map_err(|e| format!("could not reopen {}: {e}", name))?;
@@ -275,24 +291,26 @@ fn installed_version() -> Option<String> {
 }
 
 /// Standalone installs carry no Desktop manifest, so ask the binary once per
-/// session. `revka --version` prints "<name> <version>".
+/// session. `revka --version` prints "<name> <version>". Only successes are
+/// cached — a transient failure (AV lock, cold runtime) must not pin "unknown"
+/// for the whole session.
 fn standalone_version() -> Option<String> {
     static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let binary = standalone_binary()?;
-            let output = command(
-                binary
-                    .to_str()
-                    .expect("standalone binary path is valid UTF-8"),
-            )
-            .arg("--version")
-            .output()
-            .ok()?;
-            let text = String::from_utf8_lossy(&output.stdout);
-            text.split_whitespace().next_back().map(str::to_owned)
-        })
-        .clone()
+    if let Some(cached) = CACHE.get() {
+        return cached.clone();
+    }
+    let binary = standalone_binary()?;
+    let Some(path) = binary.to_str() else {
+        return None; // non-UTF-8 home directory: skip rather than panic
+    };
+    let output = command(path).arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let version = text.split_whitespace().next_back().map(str::to_owned);
+    if let Some(version) = version {
+        let _ = CACHE.set(Some(version.clone()));
+        return Some(version);
+    }
+    None
 }
 
 fn write_manifest(root: &Path, version: &str) -> Result<(), String> {
@@ -375,8 +393,8 @@ fn health_probe() -> bool {
     if stream.write_all(request.as_bytes()).is_err() {
         return false;
     }
-    // Read until the header block is complete — the body shape is the
-    // gateway's business, the status line is all Desktop needs.
+    // Read until a complete health body has arrived — like the 9miho probe,
+    // never wait for EOF on a keep-alive response.
     let mut response = Vec::with_capacity(512);
     let mut chunk = [0_u8; 512];
     loop {
@@ -404,9 +422,18 @@ fn health_response_ok(response: &[u8]) -> bool {
         return false;
     };
     let headers = String::from_utf8_lossy(&response[..header_end]);
-    headers.lines().next().is_some_and(|status_line| {
+    let status_200 = headers.lines().next().is_some_and(|status_line| {
         status_line.starts_with("HTTP/1.1 200") || status_line.starts_with("HTTP/1.0 200")
-    })
+    });
+    if !status_200 {
+        return false;
+    }
+    // The gateway answers {"status":"ok"}; requiring it keeps a random
+    // loopback service squatting on 42617 from counting as Revka.
+    serde_json::from_slice::<serde_json::Value>(&response[header_end + 4..])
+        .ok()
+        .and_then(|body| body.get("status")?.as_str().map(str::to_owned))
+        .is_some_and(|status| status == "ok")
 }
 
 #[derive(Serialize, Deserialize)]
@@ -427,7 +454,12 @@ fn write_runtime_stamp(pid: u32, version: &str) {
         pid,
         version: version.to_owned(),
     }) {
-        let _ = fs::write(path, text);
+        // Temp file + rename: a concurrent reader must never see truncated
+        // JSON and misread the running daemon as unknown/stale.
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, text).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
     }
 }
 
@@ -679,11 +711,10 @@ pub fn revka_check_update() -> Result<RevkaUpdateInfo, String> {
 #[tauri::command]
 pub fn revka_install(state: State<AppState>) -> Result<String, String> {
     let app: &AppState = &state;
+    // Fetch, download, verify, and extract with NO locks held: a slow or
+    // failed download must never cost the user their running daemon (the
+    // old build keeps serving until the swap section below).
     let (latest_version, release) = fetch_latest_release()?;
-    {
-        let _lifecycle = lifecycle_lock(app)?;
-        stop_revka(app)?;
-    }
     let bytes = download_release(&release)?;
     let root = install_root().ok_or("no home directory")?;
     fs::create_dir_all(root.join("logs")).map_err(|e| e.to_string())?;
@@ -697,8 +728,10 @@ pub fn revka_install(state: State<AppState>) -> Result<String, String> {
     ));
     let result = (|| {
         let staged_binary = extract_binary(&bytes, &staging)?;
-        // Held across the swap so no start can slip between stop and activate.
+        // ONE lock section covers stop → swap → start, so no start can slip
+        // between the stop and the activate.
         let _lifecycle = lifecycle_lock(app)?;
+        stop_revka(app)?;
         replace_runtime(&root, &staged_binary, &latest_version)?;
         Ok(match start_revka(app) {
             Ok(_) => format!("Revka {latest_version} installed and restarted"),
@@ -733,7 +766,7 @@ pub struct OnboardStarted {
 }
 
 /// Open the embedded onboarding terminal: a real PTY running the host shell,
-/// with `"<revka>" onboard` typed into it. The wizard is fully interactive —
+/// with the onboarding wizard typed into it. The wizard is fully interactive —
 /// keystrokes flow back through revka_pty_write.
 #[tauri::command]
 pub fn revka_onboard_start(
@@ -744,7 +777,14 @@ pub fn revka_onboard_start(
     let choice = crate::pty::spawn_session(&state, &binary, on_data)?;
     // Typed immediately after spawn: tty input buffers hold it until the
     // interactive shell is ready to read, so no timing guesswork is needed.
-    crate::pty::type_command(&state, &format!("\"{}\" onboard", binary.display()))?;
+    let invocation = if choice.power_shell {
+        // PowerShell parses a statement starting with a quoted string in
+        // expression mode; only the call operator runs it as a command.
+        format!("& \"{}\" onboard", binary.display())
+    } else {
+        format!("\"{}\" onboard", binary.display())
+    };
+    crate::pty::type_command(&state, &invocation)?;
     Ok(OnboardStarted {
         shell: choice.label,
     })
@@ -865,14 +905,25 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_200_health_header_block_without_waiting_for_eof() {
+    fn accepts_a_200_health_response_only_with_an_ok_body() {
         assert!(health_response_ok(
+            b"HTTP/1.1 200 OK\r\ncontent-length: 15\r\n\r\n{\"status\":\"ok\"}"
+        ));
+        // 200 with a foreign body: not Revka, don't count it as reachable.
+        assert!(!health_response_ok(
             b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}"
         ));
         assert!(!health_response_ok(
             b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 2\r\n\r\n{}"
         ));
         assert!(!health_response_ok(b"HTTP/1.1 200 OK\r\n")); // headers incomplete
+    }
+
+    #[test]
+    fn tags_allow_prerelease_suffixes_but_reject_garbage() {
+        assert_eq!(tag_version("v2026.7.1-rc1"), Ok("2026.7.1-rc1".into()));
+        assert!(tag_version("v2026..30").is_err());
+        assert!(tag_version("v2026/30").is_err());
     }
 
     #[test]

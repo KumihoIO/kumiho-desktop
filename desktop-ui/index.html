@@ -212,7 +212,7 @@
       <div class="miho-mark"><img src="./assets/kumiho-fox.png" alt="Kumiho fox"></div>
       <h3>Revka agent runtime</h3>
       <p class="dim" id="revka-empty-copy" style="margin:0;max-width:520px">Install the prebuilt runtime from official Revka releases, then finish onboarding in the embedded terminal.</p>
-      <button class="primary" id="revka-install-btn" onclick="installOrUpdateRevka()">Install Revka</button>
+      <button class="primary" id="revka-install-btn" onclick="revkaEmptyAction()">Install Revka</button>
     </div>
     <iframe class="product-pane" id="revka-frame" title="Revka Dashboard"></iframe>
     <iframe class="product-pane" id="miho-frame" title="9miho Canvas"></iframe>
@@ -787,7 +787,9 @@
       await refreshStatus();
       if(status.reachable&&!status.stale){ loadRevka(); return; }
       if(status.stale){ await startRevka(true); return; }
-      if(status.installed) await startRevka(false);
+      // Same guard as 9miho: don't plain-start when an update is known — let
+      // the update flow own that transition instead of booting the old build.
+      if(status.installed && !(REVKA_UPDATE?.update_available)) await startRevka(false);
       return;   // nothing installed: the empty state stays visible
     }
     let status; try{ status=await invoke('miho_status'); }catch(e){ toast(String(e),true); return; }
@@ -914,7 +916,16 @@
       REVKA_UPDATE=null;
       if(manual) toast('Revka update check failed: '+String(e),true);
       return null;
-    }finally{ if(button) button.textContent='Check update'; }
+    }
+    finally{
+      if(button) button.textContent='Check update';
+      const copy=$('revka-update-copy');
+      if(copy) copy.textContent=REVKA_UPDATE
+        ?(REVKA_UPDATE.update_available
+          ?'Official Revka '+REVKA_UPDATE.latest_version+' is ready to download, verify, and install.'
+          :'Revka is up to date (latest '+REVKA_UPDATE.latest_version+').')
+        :'Checks official prebuilt Revka releases (SHA-256 verified).';
+    }
   }
   let REVKA_START_IN_FLIGHT=null;
   async function startRevka(force){
@@ -936,6 +947,15 @@
     refreshStatus();
     return up;
   }
+  // Decide at click time what the empty-state button means: its label is
+  // rendered by the 5s poll and can be stale by the time it's clicked.
+  function revkaEmptyAction(){
+    invoke('revka_status').then(r=>{
+      const updateReady=r.stale||!!(REVKA_UPDATE?.update_available);
+      if(!r.installed || updateReady) installOrUpdateRevka();
+      else startRevka(false);
+    }).catch(()=>installOrUpdateRevka());
+  }
   async function installOrUpdateRevka(){
     const button=$('revka-install-btn'), appButton=$('revka-app-install'); if(button) button.disabled=true; if(appButton) appButton.disabled=true;
     let wasInstalled=false;
@@ -948,6 +968,9 @@
     try{
       const result=await invoke('revka_install');
       setLog('apps','✓ '+result);
+      // revka_install restarts internally, but a failed restart is reported as
+      // a success string — make sure the daemon is actually up either way.
+      await startRevka(false);
       if(!wasInstalled) await openOnboardTerminal();   // first install → straight into onboarding
     }catch(e){
       setLog('apps',String(e),true); toast(String(e),true);
@@ -956,7 +979,7 @@
   }
 
   // ---------- embedded onboarding terminal (xterm.js + native PTY) ----------
-  let TERM=null, TERM_FIT=null, PTY_OPEN=false;
+  let TERM=null, TERM_FIT=null, PTY_OPEN=false, TERM_GEN=0;
   function initTerm(){
     if(TERM){ TERM_FIT.fit(); return; }
     TERM=new window.Terminal({
@@ -974,25 +997,39 @@
   async function openOnboardTerminal(){
     $('onboard-term').classList.add('show');
     initTerm();
-    if(PTY_OPEN) return;
+    try{ TERM.reset(); }catch(e){}   // fresh scrollback per wizard run
+    const myGen=++TERM_GEN;
+    // Optimistic and synchronous: closeOnboardTerminal must always see a live
+    // flag while a session might exist, or the shell leaks past the modal.
+    PTY_OPEN=true;
+    $('term-shell').textContent='· starting shell…';
     const channel=new T.ipc.Channel();
     channel.onmessage=(message)=>{
+      if(myGen!==TERM_GEN) return;   // superseded session — ignore its stream
       if(message.type==='exit'){ PTY_OPEN=false; TERM.writeln('\r\n\x1b[2m[session ended]\x1b[0m'); return; }
       TERM.write(message.data);
     };
     try{
       const started=await invoke('revka_onboard_start',{onData:channel});
-      PTY_OPEN=true;
+      // The modal may have closed (or been reopened) while this was spawning.
+      if(!$('onboard-term').classList.contains('show')){ try{ await invoke('revka_pty_stop'); }catch(e){} }
+      if(myGen!==TERM_GEN || !$('onboard-term').classList.contains('show')) return;
       $('term-shell').textContent='· '+started.shell;
       TERM_FIT.fit();
     }catch(e){
-      TERM.writeln('\x1b[31m'+String(e)+'\x1b[0m');
-      toast(String(e),true);
+      if(myGen===TERM_GEN){
+        PTY_OPEN=false;
+        TERM.writeln('\x1b[31m'+String(e)+'\x1b[0m');
+        toast(String(e),true);
+      }
     }
   }
   async function closeOnboardTerminal(){
     $('onboard-term').classList.remove('show');
-    if(PTY_OPEN){ PTY_OPEN=false; try{ await invoke('revka_pty_stop'); }catch(e){} }
+    PTY_OPEN=false;
+    // Unconditional: the backend no-ops when nothing is running, but skipping
+    // the call on a stale flag would leave the wizard alive invisibly.
+    try{ await invoke('revka_pty_stop'); }catch(e){}
   }
 
   // ---------- Memory ----------
@@ -1154,13 +1191,14 @@
     }catch(e){ if(isCurrent()) pill($('memory-plugin-pill'),false,'unavailable'); }
     try{
       const revka=await invoke('revka_status');
-      if(!isCurrent()) return;
-      pill($('revka-app-pill'),revka.reachable,revka.reachable?'running':(revka.installed?'stopped':'not installed'));
-      $('revka-version').textContent=revka.version
-        ?'Version '+revka.version+(revka.stale?' installed · serving '+(revka.serving_version||'an older build'):'')
-        :'Not installed';
-      $('revka-version-detail').textContent=(revka.managed?'Runtime · ~/.kumiho/apps/revka':'Runtime · standalone ~/.revka')+' · 127.0.0.1:'+revka.port;
-      $('revka-app-install').textContent=!revka.installed?'Install':((REVKA_UPDATE?.update_available||revka.stale)?'Update':'Reinstall');
+      if(isCurrent()){
+        pill($('revka-app-pill'),revka.reachable,revka.reachable?'running':(revka.installed?'stopped':'not installed'));
+        $('revka-version').textContent=revka.version
+          ?'Version '+revka.version+(revka.stale?' installed · serving '+(revka.serving_version||'an older build'):'')
+          :'Not installed';
+        $('revka-version-detail').textContent=(revka.managed?'Runtime · ~/.kumiho/apps/revka':'Runtime · standalone ~/.revka')+' · 127.0.0.1:'+revka.port;
+        $('revka-app-install').textContent=!revka.installed?'Install':((REVKA_UPDATE?.update_available||revka.stale)?'Update':'Reinstall');
+      }
     }catch(e){ if(isCurrent()){ pill($('revka-app-pill'),false,'unavailable'); setLog('apps',String(e),true); } }
     try{
       const miho=mihoStatus||await invoke('miho_status');
