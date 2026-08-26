@@ -81,7 +81,7 @@
         await invoke('ce_configure_rollback');
         return { ok: false, configPending: false, cleanupBlocked: false, message };
       } catch (rollbackError) {
-        message += '\nSetup failed and the previous config could not be restored: ' + String(rollbackError);
+        message += '\nSetup failed and the previous config is still pending cleanup: ' + String(rollbackError);
         return { ok: false, configPending: true, cleanupBlocked: false, message };
       }
     }

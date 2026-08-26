@@ -98,8 +98,11 @@ assert.match(html, /const ready=ce\.reachable && await ceReady\(\)[\s\S]*if\(!re
 assert.doesNotMatch(html, /withTimeout\(invoke\('docker_up'/);
 assert.match(html, /startCeAutoboot\(\{[\s\S]*startDatabases:async\(\)=>[\s\S]*await invoke\('docker_up'[\s\S]*startServer:startCeAndWait/);
 assert.match(html, /invoke\('docker_up',[\s\S]{0,180}timeoutMs:30000/);
-assert.match(html, /Community Edition did not become ready and was stopped/);
+assert.match(html, /Community Edition did not become ready — open Settings → General to inspect its current status and retry/);
+assert.doesNotMatch(html, /Community Edition did not become ready and was stopped/);
 assert.doesNotMatch(html, /Community Edition is still starting/);
+assert.match(ceSetupSource, /previous config is still pending cleanup/);
+assert.match(html, /failureMessage=outcome\.message[\s\S]*if\(configPending&&!cleanupBlocked\)[\s\S]*Previous config was restored during cleanup[\s\S]*failureMessage\?failureMessage/);
 assert.match(html, /\$\('settings'\)\.classList\.contains\('show'\)[\s\S]*\$\('settings-mode'\)\.value==='ce'[\s\S]*renderCeRuntimeStatus\(ce\)/);
 assert.match(html, /id="ce-log"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.match(html, /id="log-general"[^>]*role="status"[^>]*aria-live="polite"/);
@@ -180,6 +183,28 @@ async function testSetupTransactions() {
     assert.match(outcome.message, /password from this setup may not match the existing database/i);
     assert.deepEqual(calls, ['ce_start', 'ce_log_tail', 'ce_configure_rollback']);
     assert.equal(stopCalls, 1);
+  }
+
+  {
+    const calls = [];
+    const outcome = await completeCeSetupStart({
+      databaseResult: 'Neo4j already serving 7687 — reusing',
+      invoke: async (command) => {
+        calls.push(command);
+        if (command === 'ce_start') throw new Error('authentication failure');
+        if (command === 'ce_log_tail') return '[bolt] client is unauthorized';
+        if (command === 'ce_configure_rollback') throw new Error('temporary disk error');
+        throw new Error('unexpected command: ' + command);
+      },
+      waitForReady: async () => false,
+      stopCeAndWait: async () => true,
+    });
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.configPending, true);
+    assert.equal(outcome.cleanupBlocked, false);
+    assert.match(outcome.message, /password from this setup may not match/i);
+    assert.match(outcome.message, /still pending cleanup: .*temporary disk error/i);
+    assert.deepEqual(calls, ['ce_start', 'ce_log_tail', 'ce_configure_rollback']);
   }
 
   {

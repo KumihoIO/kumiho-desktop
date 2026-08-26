@@ -376,7 +376,7 @@
     if(CE_STARTING) return;
     const button=$('ce-btn'), idleLabel=button.textContent;
     CE_STARTING=true; $('ce-btn').disabled=true; button.textContent='Starting Community Edition…';
-    let completed=false, configPending=false, cleanupBlocked=false;
+    let completed=false, configPending=false, cleanupBlocked=false, failureMessage='';
     setLog('ce-log','');
     try{
       const pendingConfig=await invoke('ce_configure_pending');
@@ -406,13 +406,14 @@
         waitForReady:()=>waitFor(ceReady,40000),
       });
       configPending=outcome.configPending; cleanupBlocked=outcome.cleanupBlocked;
-      if(!outcome.ok){ setLog('ce-log',outcome.message,true); return; }
+      if(!outcome.ok){ failureMessage=outcome.message; setLog('ce-log',failureMessage,true); return; }
       markStep('start','done'); completed=true; await adoptCE();
     }catch(e){ setLog('ce-log',String(e),true); }
     finally{
       if(configPending&&!cleanupBlocked){
-        try{await invoke('ce_configure_rollback'); configPending=false;}
-        catch(e){setLog('ce-log','Setup failed and the previous config could not be restored: '+String(e),true);}
+        try{await invoke('ce_configure_rollback'); configPending=false;
+          if(failureMessage) setLog('ce-log',failureMessage+'\nPrevious config was restored during cleanup.',true);}
+        catch(e){setLog('ce-log',(failureMessage?failureMessage+'\n':'')+'Setup failed and the previous config could not be restored: '+String(e),true);}
       }
       CE_STARTING=false; if(!completed){ button.disabled=false; button.textContent=idleLabel; }
     }
@@ -983,7 +984,7 @@
                 },
                 startServer:startCeAndWait,
               });
-              if(!up) toast('Community Edition did not become ready and was stopped — open Settings → General to retry.', true);
+              if(!up) toast('Community Edition did not become ready — open Settings → General to inspect its current status and retry.', true);
             } catch(e){ const message='Community Edition could not start automatically: '+String(e); setLog('general',message,true); toast(message,true); }
             finally { await finishCeAction(false); }
           }
