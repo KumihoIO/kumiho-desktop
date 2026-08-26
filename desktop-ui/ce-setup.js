@@ -115,6 +115,14 @@
     }
   }
 
+  async function startCeAutoboot(options) {
+    const { startDatabases, startServer } = options;
+    // A Tauri invoke cannot be cancelled by Promise.race. Wait for the native
+    // Docker operation to settle so it cannot overlap the CE server start.
+    try { await startDatabases(); } catch (_) {}
+    return startServer();
+  }
+
   const api = {
     ceControlState,
     ceHealthReady,
@@ -123,6 +131,7 @@
     completeCeSetupStart,
     neo4jPasswordError,
     rollbackPendingCeSetup,
+    startCeAutoboot,
     startCeRuntime,
   };
   root.KumihoDesktopCeSetup = api;

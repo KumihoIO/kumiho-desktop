@@ -9,6 +9,7 @@ const {
   completeCeSetupStart,
   neo4jPasswordError,
   rollbackPendingCeSetup,
+  startCeAutoboot,
   startCeRuntime,
 } = require('../desktop-ui/ce-setup.js');
 
@@ -75,15 +76,22 @@ assert.match(html, /async function ceRestart\(\)\{[\s\S]*beginCeAction\('restart
 assert.doesNotMatch(html, /setTimeout\(\(\)=>cmd\('ce_start'/);
 assert.match(html, /async function ceUpdate\(\)\{[\s\S]*beginCeAction\('update'\)[\s\S]*await finishCeAction\(\)/);
 assert.match(html, /const ready=ce\.reachable && await ceReady\(\)[\s\S]*if\(!ready && beginCeAction\('boot'\)\)[\s\S]*catch\(e\)\{ toast\('Community Edition could not start automatically:[\s\S]*finally \{ await finishCeAction\(false\); \}/);
+assert.doesNotMatch(html, /withTimeout\(invoke\('docker_up'/);
+assert.match(html, /startCeAutoboot\(\{[\s\S]*startDatabases:async\(\)=>[\s\S]*await invoke\('docker_up'[\s\S]*startServer:startCeAndWait/);
+assert.match(html, /Community Edition did not become ready and was stopped/);
+assert.doesNotMatch(html, /Community Edition is still starting/);
 assert.match(html, /\$\('settings'\)\.classList\.contains\('show'\)[\s\S]*\$\('settings-mode'\)\.value==='ce'[\s\S]*renderCeRuntimeStatus\(ce\)/);
 assert.match(html, /id="ce-log"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.match(html, /id="log-general"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.doesNotMatch(dockerSource, /\["rm",\s*"-f"/, 'managed database containers must never be deleted automatically');
+assert.match(runSource, /fn neo4j_password_error[\s\S]*NEO4J_MIN_PASSWORD_LENGTH[\s\S]*pub fn ce_configure[\s\S]*neo4j_password_error\(&neo4j_password\)/);
 assert.match(runSource, /struct CeProcessMarker[\s\S]*fn process_identity[\s\S]*fn stop_recorded_ce/);
+assert.match(runSource, /CE_PROCESS_INTENT_FILE[\s\S]*write_private_file\(&intent_path, b"starting"\)[\s\S]*cmd\.spawn\(\)[\s\S]*write_ce_process_marker/);
+assert.match(runSource, /write_private_file_atomic[\s\S]*std::fs::rename[\s\S]*write_ce_process_marker/);
 assert.match(runSource, /taskkill[\s\S]*"\/PID"[\s\S]*libc::kill\(marker\.pid as i32/);
-assert.match(runSource, /pub fn ce_stop[\s\S]*stop_recorded_ce\(&home\)/);
+assert.match(runSource, /pub fn ce_stop[\s\S]*state\.ce_start\.lock[\s\S]*stop_tracked_child[\s\S]*stop_recorded_ce\(&home\)/);
 assert.doesNotMatch(runSource, /taskkill[\s\S]{0,100}"\/IM",\s*"kumiho_server\.exe"|pkill[\s\S]{0,100}kumiho_server/);
-assert.match(runSource, /pub fn kill_pending_ce[\s\S]*setup_config_pending_at[\s\S]*child\.kill\(\)[\s\S]*child\.wait\(\)/);
+assert.match(runSource, /pub fn kill_pending_ce[\s\S]*state\.ce_start\.lock[\s\S]*setup_config_pending_at[\s\S]*stop_tracked_child/);
 assert.match(mainSource, /RunEvent::ExitRequested[\s\S]*run::kill_pending_ce\(app\)/);
 
 const inlineScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
@@ -91,6 +99,31 @@ assert.ok(inlineScripts.length > 0, 'the inline application script should remain
 for (const [, source] of inlineScripts) new Function(source);
 
 async function testSetupTransactions() {
+  {
+    const calls = [];
+    let finishDatabases;
+    const databases = new Promise((resolve) => { finishDatabases = resolve; });
+    const pending = startCeAutoboot({
+      startDatabases: async () => { calls.push('databases-start'); await databases; calls.push('databases-done'); },
+      startServer: async () => { calls.push('server-start'); return { up: true }; },
+    });
+    await Promise.resolve();
+    assert.deepEqual(calls, ['databases-start']);
+    finishDatabases();
+    assert.deepEqual(await pending, { up: true });
+    assert.deepEqual(calls, ['databases-start', 'databases-done', 'server-start']);
+  }
+
+  {
+    const calls = [];
+    const outcome = await startCeAutoboot({
+      startDatabases: async () => { calls.push('databases'); throw new Error('Docker is still warming up'); },
+      startServer: async () => { calls.push('server'); return { up: false }; },
+    });
+    assert.deepEqual(outcome, { up: false });
+    assert.deepEqual(calls, ['databases', 'server']);
+  }
+
   {
     const calls = [];
     let stopCalls = 0;

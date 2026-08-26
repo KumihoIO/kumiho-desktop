@@ -934,10 +934,6 @@
     return up;
   }
 
-  // Bound a promise so a hung CLI (e.g. `docker start` against a daemon still
-  // warming up at login) can't stall startup forever.
-  const withTimeout=(p,ms)=>Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('timed out')),ms))]);
-
   // On launch, optionally bring the local CE infra up (server + Docker DBs) before
   // Memory, so a hands-free start lands on a live graph, not an empty one. Only
   // in CE mode, only when the toggle is on, and only if CE isn't already reachable.
@@ -953,15 +949,20 @@
           const ready=ce.reachable && await ceReady();
           if(!ready && beginCeAction('boot')){
             toast('Starting Community Edition…');
-            // Best-effort and time-bounded. Empty password reuses the containers
-            // made during setup; if the Docker daemon is still coming up at login,
-            // these may fail — we don't block the app, we just poll for CE and, if
-            // it never answers, point the user at Settings → General.
+            // Empty password reuses the containers made during setup. Keep the
+            // native Docker operation and CE start serialized: Tauri invokes are
+            // not cancelled when a JavaScript timeout wins a Promise.race.
             try{
               if(ce.reachable) await stopCeAndWait();
-              try{ await withTimeout(invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis}), 25000); }catch(e){}
-              const {up}=await startCeAndWait();
-              if(!up) toast('Community Edition is still starting — open Settings → General if it doesn’t appear.', true);
+              const {up}=await KumihoDesktopCeSetup.startCeAutoboot({
+                startDatabases:async()=>{
+                  const slow=setTimeout(()=>toast('Docker setup is taking longer than expected. Community Edition will start after this step finishes.'),25000);
+                  try{ return await invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis}); }
+                  finally{ clearTimeout(slow); }
+                },
+                startServer:startCeAndWait,
+              });
+              if(!up) toast('Community Edition did not become ready and was stopped — open Settings → General to retry.', true);
             } catch(e){ toast('Community Edition could not start automatically: '+String(e),true); }
             finally { await finishCeAction(false); }
           }
