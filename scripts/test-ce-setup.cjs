@@ -21,22 +21,27 @@ assert.equal(neo4jPasswordError('여덟글자암호임요'), '');
 assert.equal(ceStartDisabled(false, false), false);
 assert.equal(ceStartDisabled(true, false), true);
 assert.equal(ceStartDisabled(false, true), true);
-assert.deepEqual(ceControlState(false, false, false), {
+assert.deepEqual(ceControlState(false, false, false, true), {
   startDisabled: false,
   restartDisabled: true,
   stopDisabled: true,
 });
-assert.deepEqual(ceControlState(true, false, false), {
+assert.deepEqual(ceControlState(true, false, false, true), {
   startDisabled: true,
   restartDisabled: false,
   stopDisabled: false,
 });
-assert.deepEqual(ceControlState(true, true, false), {
+assert.deepEqual(ceControlState(true, true, false, true), {
   startDisabled: true,
   restartDisabled: true,
   stopDisabled: true,
 });
-assert.deepEqual(ceControlState(false, false, true), {
+assert.deepEqual(ceControlState(false, false, true, false), {
+  startDisabled: true,
+  restartDisabled: true,
+  stopDisabled: false,
+});
+assert.deepEqual(ceControlState(true, false, true, false), {
   startDisabled: true,
   restartDisabled: true,
   stopDisabled: false,
@@ -63,11 +68,11 @@ assert.match(html, /KumihoDesktopCeSetup\.neo4jPasswordError\(pass\)/);
 assert.match(html, /id="ce-start-btn"[^>]*onclick="ceStart\(\)"/);
 assert.match(html, /id="ce-restart-btn"[^>]*onclick="ceRestart\(\)"/);
 assert.match(html, /id="ce-stop-btn"[^>]*onclick="ceStop\(\)"/);
-assert.match(html, /ceControlState\(CE_LAST_REACHABLE,CE_STARTING,CE_LAST_MANAGED\)/);
+assert.match(html, /ceControlState\(CE_LAST_REACHABLE,CE_STARTING,CE_LAST_MANAGED,CE_LAST_STOPPABLE\)/);
 assert.match(html, /CE_STARTING=true;[\s\S]*\$\('ce-btn'\)\.disabled=true/);
 assert.doesNotMatch(html, /if\(!st\.configured\)/);
 assert.match(ceSetupSource, /password from this setup may not match the existing database/);
-assert.match(html, /const pendingConfig=await invoke\('ce_configure_pending'\)[\s\S]*const ready=st\.reachable && await ceReady\(\)[\s\S]*if\(ready\)\{ await invoke\('ce_configure_commit'\)[\s\S]*if\(pendingConfig\)[\s\S]*rollbackPendingCeSetup\(\{invoke,stopCeAndWait\}\)[\s\S]*else if\(st\.reachable\) await stopCeAndWait\(\)[\s\S]*await invoke\('ce_configure'/);
+assert.match(html, /const pendingConfig=await invoke\('ce_configure_pending'\)[\s\S]*const ready=st\.reachable && await ceReady\(\)[\s\S]*if\(ready\)\{ await invoke\('ce_configure_commit'\)[\s\S]*if\(pendingConfig\)[\s\S]*rollbackPendingCeSetup\(\{invoke,stopCeAndWait\}\)[\s\S]*else if\(st\.reachable\|\|st\.managed\) await stopCeAndWait\(\)[\s\S]*await invoke\('ce_configure'/);
 assert.match(html, /completeCeSetupStart\(\{[\s\S]*invoke, databaseResult, stopCeAndWait,[\s\S]*waitForReady:\(\)=>waitFor\(ceReady,40000\)/);
 assert.match(html, /configPending=outcome\.configPending; cleanupBlocked=outcome\.cleanupBlocked/);
 assert.match(html, /if\(configPending&&!cleanupBlocked\)[\s\S]*await invoke\('ce_configure_rollback'\)/);
@@ -79,6 +84,9 @@ assert.match(html, /async function ceReady\(\)[\s\S]*ceHealthReady\(await invoke
 assert.match(html, /async function ceStop\(\)\{[\s\S]*beginCeAction\('stop'\)[\s\S]*await finishCeAction\(\)/);
 assert.match(html, /async function stopCeAndWait\(force=false\)\{[\s\S]*!current\.reachable&&!current\.managed&&!force[\s\S]*await invoke\('ce_stop',\{force\}\)[\s\S]*!s\.reachable[\s\S]*It was not restarted/);
 assert.match(html, /async function ceRestart\(\)\{[\s\S]*beginCeAction\('restart'\)[\s\S]*await stopCeAndWait\(\)[\s\S]*await startCeAndWait\(\)/);
+assert.match(html, /manualRecovery=CE_LAST_REACHABLE&&!CE_LAST_STOPPABLE[\s\S]*Manual stop steps[\s\S]*update\.disabled=CE_STARTING\|\|manualRecovery/);
+assert.match(html, /async function dbUp\(\)\{ if\(!beginCeAction\('db-start'\)\)return;[\s\S]*finally\{ await finishCeAction\(false\); \} \}/);
+assert.match(html, /async function dbDown\(\)\{ if\(!beginCeAction\('db-stop'\)\)return;[\s\S]*invoke\('docker_down'\)[\s\S]*invoke\('docker_status'\)[\s\S]*still appears to be running[\s\S]*finally\{ await finishCeAction\(false\); \} \}/);
 assert.doesNotMatch(html, /setTimeout\(\(\)=>cmd\('ce_start'/);
 assert.match(html, /async function ceUpdate\(\)\{[\s\S]*beginCeAction\('update'\)[\s\S]*await finishCeAction\(\)/);
 assert.match(html, /const ready=ce\.reachable && await ceReady\(\)[\s\S]*if\(!ready && beginCeAction\('boot'\)\)[\s\S]*catch\(e\)\{ const message='Community Edition could not start automatically:[\s\S]*setLog\('general',message,true\)[\s\S]*finally \{ await finishCeAction\(false\); \}/);
@@ -92,19 +100,22 @@ assert.match(html, /id="ce-log"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.match(html, /id="log-general"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.doesNotMatch(dockerSource, /\["rm",\s*"-f"/, 'managed database containers must never be deleted automatically');
 assert.match(dockerSource, /fn docker_command_output[\s\S]*child\.try_wait\(\)[\s\S]*child\.kill\(\)[\s\S]*ErrorKind::TimedOut/);
+assert.match(dockerSource, /fn receive_output[\s\S]*recv_timeout[\s\S]*pub async fn docker_status[\s\S]*spawn_blocking[\s\S]*pub async fn docker_up[\s\S]*spawn_blocking/);
 assert.match(dockerSource, /timeout_ms:\s*Option<u64>[\s\S]*DockerDeadline::after/);
+assert.match(dockerSource, /fn docker_down_blocking[\s\S]*docker_available[\s\S]*"info"[\s\S]*find_container_checked[\s\S]*could not stop/);
 assert.match(runSource, /fn neo4j_password_error[\s\S]*NEO4J_MIN_PASSWORD_LENGTH[\s\S]*pub fn ce_configure[\s\S]*neo4j_password_error\(&neo4j_password\)/);
 assert.match(runSource, /struct CeProcessMarker[\s\S]*fn process_identity[\s\S]*fn active_ce_process_marker/);
 assert.match(runSource, /CE_PROCESS_INTENT_FILE[\s\S]*write_private_file\(&intent_path, b"starting"\)[\s\S]*sync_directory\(&home\)[\s\S]*cmd\.spawn\(\)[\s\S]*write_ce_process_marker/);
-assert.match(runSource, /write_private_file_atomic[\s\S]*std::fs::rename[\s\S]*write_ce_process_marker/);
+assert.match(runSource, /fn move_file_durable[\s\S]*MoveFileExW[\s\S]*fn write_private_file_atomic[\s\S]*write_ce_process_marker/);
 assert.doesNotMatch(runSource, /fn stop_recorded_ce|libc::kill\(marker\.pid/);
 assert.match(runSource, /pub fn ce_stop[\s\S]*state\.ce_start\.lock[\s\S]*stop_tracked_child[\s\S]*active_ce_process_marker/);
 assert.doesNotMatch(runSource, /taskkill[\s\S]{0,100}"\/IM",\s*"kumiho_server\.exe"|pkill[\s\S]{0,100}kumiho_server/);
-assert.match(runSource, /pub struct CeStatus[\s\S]*pub managed: bool[\s\S]*CE_PROCESS_MARKER_FILE[\s\S]*CE_PROCESS_INTENT_FILE/);
-assert.match(runSource, /fn sync_directory[\s\S]*directory\.sync_all[\s\S]*fn publish_private_file[\s\S]*std::fs::rename/);
+assert.match(runSource, /pub struct CeStatus[\s\S]*pub managed: bool[\s\S]*pub stoppable: bool[\s\S]*CE_PROCESS_MARKER_FILE[\s\S]*CE_PROCESS_INTENT_FILE/);
+assert.match(runSource, /fn sync_directory[\s\S]*directory\.sync_all[\s\S]*fn publish_private_file[\s\S]*move_file_durable\(source, destination, true\)/);
 assert.match(runSource, /pub fn kill_pending_ce[\s\S]*state\.ce_start\.lock[\s\S]*setup_config_pending_at[\s\S]*stop_tracked_child/);
 assert.match(mainSource, /RunEvent::ExitRequested[\s\S]*run::kill_pending_ce\(app\)/);
-assert.match(releaseWorkflowSource, /Verify release tag matches Desktop version[\s\S]*TAG_VERSION[\s\S]*CARGO_VERSION[\s\S]*TAURI_VERSION/);
+assert.match(releaseWorkflowSource, /Verify release tag matches Desktop version[\s\S]*GITHUB_REF_TYPE[\s\S]*refs\/tags[\s\S]*TAG_VERSION[\s\S]*CARGO_VERSION[\s\S]*TAURI_VERSION/);
+assert.match(releaseWorkflowSource, /getRef\(\{ owner, repo, ref: `tags\/\$\{tag\}` \}\)/);
 
 const inlineScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 assert.ok(inlineScripts.length > 0, 'the inline application script should remain present');
@@ -233,7 +244,7 @@ async function testSetupTransactions() {
       // owns an unbound child from the previous attempt.
       stopCeAndWait: async (force) => { forced = force; return true; },
     });
-    assert.equal(forced, false);
+    assert.equal(forced, true);
     assert.deepEqual(calls, ['ce_configure_rollback']);
   }
 

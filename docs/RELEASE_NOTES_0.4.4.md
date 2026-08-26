@@ -20,16 +20,21 @@
   `kumiho_server` on the machine. Cross-session recovery never signals a reused
   PID: it fails closed, preserves the pending config, and gives a manual PID.
 - Config candidates and rollback records are written and published atomically.
-  On macOS and Linux their containing directory is synchronized before the live
-  config changes, keeping the rollback record durable across interrupted setup.
+  macOS and Linux synchronize their containing directory before the live config
+  changes; Windows uses write-through atomic moves and durable tombstones. This
+  keeps recovery records usable across interrupted setup and power loss.
 - Password-bearing candidate, backup, and final configuration files remain
   owner-readable only (`0600`) on macOS and Linux.
-- Start, stop, restart, update, and automatic startup share one action lock.
+- Start, stop, restart, database controls, update, and automatic startup share
+  one action lock. A server retained from an earlier Desktop session is labeled
+  as requiring a manual stop instead of presenting an unsafe automatic action.
   Runtime controls now stay disabled while an action is running, and Start is
   disabled whenever Community Edition is already serving or has a managed start
-  pending. Automatic startup uses a real native Docker deadline, terminates a
-  stuck CLI child, and preserves the Docker error instead of overlapping the
-  later server action or hiding the root cause.
+  pending. Automatic startup runs Docker work off the UI thread, uses a real
+  native deadline, terminates a stuck CLI child, bounds inherited output pipes,
+  and preserves the Docker error instead of overlapping the later server action
+  or hiding the root cause.
 - The release workflow runs the new CE setup regression checks on Windows,
   Linux, Apple silicon macOS, and Intel macOS builds, and rejects a release tag
-  that does not match the Cargo and Tauri versions.
+  that does not match the Cargo and Tauri versions. Manual runs must also start
+  from an existing release tag, so they cannot synthesize a branch-named release.

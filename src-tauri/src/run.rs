@@ -62,6 +62,8 @@ pub struct CeStatus {
     pub reachable: bool,
     /// Desktop has a durable process/launch record, even if 9190 is not bound yet.
     pub managed: bool,
+    /// This Desktop session still owns the native child handle and can stop it safely.
+    pub stoppable: bool,
     pub port: u16,
     pub version: Option<String>,
     pub mode: Option<String>,
@@ -72,7 +74,7 @@ pub struct CeStatus {
 }
 
 #[tauri::command]
-pub fn ce_status() -> CeStatus {
+pub fn ce_status(state: State<'_, AppState>) -> CeStatus {
     let live = http_get_json(CE_PORT, "/api/_live");
     let home = kumiho_home();
     let configured = home
@@ -86,9 +88,15 @@ pub fn ce_status() -> CeStatus {
                 || home.join(CE_PROCESS_INTENT_FILE).exists()
         })
         .unwrap_or(false);
+    let stoppable = state
+        .ce
+        .lock()
+        .map(|tracked| tracked.is_some())
+        .unwrap_or(false);
     CeStatus {
         reachable: live.is_some() || port_open(CE_PORT),
         managed,
+        stoppable,
         port: CE_PORT,
         version: live
             .as_ref()
@@ -198,7 +206,6 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
 
     file.write_all(contents).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     file.sync_all().map_err(|e| e.to_string())?;
     restrict_private_file(path)
 }
@@ -230,8 +237,83 @@ fn copy_private_file(from: &Path, to: &Path) -> Result<(), String> {
     #[cfg(not(unix))]
     {
         std::fs::copy(from, to).map_err(|e| e.to_string())?;
-        restrict_private_file(to)
+        restrict_private_file(to)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(to)
+            .and_then(|destination| destination.sync_all())
+            .map_err(|e| e.to_string())
     }
+}
+
+#[cfg(windows)]
+#[link(name = "Kernel32")]
+extern "system" {
+    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+}
+
+fn move_file_durable(source: &Path, destination: &Path, replace: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+        let source_wide: Vec<u16> = source
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let destination_wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let flags = MOVEFILE_WRITE_THROUGH
+            | if replace {
+                MOVEFILE_REPLACE_EXISTING
+            } else {
+                0
+            };
+        // SAFETY: both paths are owned, NUL-terminated buffers that remain alive
+        // for the duration of the synchronous Win32 call.
+        let moved = unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) };
+        if moved == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = replace;
+        std::fs::rename(source, destination).map_err(|e| e.to_string())
+    }
+}
+
+fn retired_path(path: &Path) -> std::path::PathBuf {
+    let mut retired = path.as_os_str().to_os_string();
+    retired.push(".retired");
+    retired.into()
+}
+
+/// Remove a recovery-critical name by first moving it durably out of the
+/// transaction namespace. If a later delete is lost in a power failure, only
+/// the ignored `.retired` tombstone can reappear, never a live rollback record.
+fn retire_file_durable(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let retired = retired_path(path);
+    remove_if_present(&retired)?;
+    move_file_durable(path, &retired, true)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    remove_if_present(&retired)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 fn write_private_file_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
@@ -248,7 +330,7 @@ fn write_private_file_atomic(path: &Path, contents: &[u8]) -> Result<(), String>
         let _ = remove_if_present(&temporary);
         return Err(format!("recovery record already exists: {}", path.display()));
     }
-    if let Err(error) = std::fs::rename(&temporary, path) {
+    if let Err(error) = move_file_durable(&temporary, path, false) {
         let _ = remove_if_present(&temporary);
         return Err(error.to_string());
     }
@@ -260,9 +342,7 @@ fn write_private_file_atomic(path: &Path, contents: &[u8]) -> Result<(), String>
 
 fn publish_private_file(source: &Path, destination: &Path) -> Result<(), String> {
     restrict_private_file(source)?;
-    #[cfg(not(unix))]
-    remove_if_present(destination)?;
-    std::fs::rename(source, destination).map_err(|error| error.to_string())?;
+    move_file_durable(source, destination, true)?;
     restrict_private_file(destination)?;
     if let Some(parent) = destination.parent() {
         sync_directory(parent)?;
@@ -409,11 +489,19 @@ fn is_ce_process_identity(identity: &str) -> bool {
     identity.to_ascii_lowercase().contains("kumiho_server")
 }
 
-fn active_ce_process_marker(home: &Path) -> Result<Option<CeProcessMarker>, String> {
+fn active_ce_process_marker_with<F, G>(
+    home: &Path,
+    process_identity_for_pid: F,
+    any_ce_process_is_running: G,
+) -> Result<Option<CeProcessMarker>, String>
+where
+    F: FnOnce(u32) -> Result<Option<String>, String>,
+    G: FnOnce() -> Result<bool, String>,
+{
     let Some(marker) = read_ce_process_marker(home)? else {
         return Ok(None);
     };
-    match process_identity(marker.pid)? {
+    match process_identity_for_pid(marker.pid)? {
         identity if ce_process_identity_matches(&marker.identity, identity.as_deref()) => {
             // A complete marker supersedes the pre-spawn intent record.
             remove_if_present(&ce_process_intent_path(home))?;
@@ -426,13 +514,17 @@ fn active_ce_process_marker(home: &Path) -> Result<Option<CeProcessMarker>, Stri
             ));
         }
         _ => {
-            if any_ce_process_running()? {
+            if any_ce_process_is_running()? {
                 return Err("the recorded CE PID is gone or changed, but another kumiho_server process exists; recovery was preserved for manual inspection".into());
             }
             remove_ce_process_marker(home)?;
             Ok(None)
         }
     }
+}
+
+fn active_ce_process_marker(home: &Path) -> Result<Option<CeProcessMarker>, String> {
+    active_ce_process_marker_with(home, process_identity, any_ce_process_running)
 }
 
 fn recorded_ce_running(home: &Path) -> Result<bool, String> {
@@ -484,15 +576,14 @@ fn rollback_setup_config_at(home: &Path) -> Result<bool, String> {
         publish_private_file(&candidate, &config)?;
         true
     } else if marker.exists() {
-        remove_if_present(&config)?;
-        sync_directory(home)?;
+        retire_file_durable(&config)?;
         true
     } else {
         false
     };
-    remove_if_present(&backup)?;
+    retire_file_durable(&backup)?;
     remove_if_present(&backup_temp)?;
-    remove_if_present(&marker)?;
+    retire_file_durable(&marker)?;
     remove_if_present(&candidate)?;
     sync_directory(home)?;
     Ok(restored)
@@ -508,9 +599,7 @@ fn stage_setup_config_at(home: &Path, contents: &str) -> Result<(), String> {
     write_private_file(&candidate, contents.as_bytes())?;
     let preserve_result = if config.exists() {
         let result = copy_private_file(&config, &backup_temp).and_then(|()| {
-            std::fs::rename(&backup_temp, &backup)
-                .map_err(|e| e.to_string())
-                .and_then(|()| sync_directory(home))
+            move_file_durable(&backup_temp, &backup, false).and_then(|()| sync_directory(home))
         });
         if result.is_err() {
             let _ = remove_if_present(&backup_temp);
@@ -518,7 +607,7 @@ fn stage_setup_config_at(home: &Path, contents: &str) -> Result<(), String> {
         }
         result
     } else {
-        write_private_file(&marker, b"new config").and_then(|()| sync_directory(home))
+        write_private_file_atomic(&marker, b"new config")
     };
     if let Err(error) = preserve_result {
         let _ = remove_if_present(&candidate);
@@ -539,13 +628,8 @@ fn commit_setup_config_at(home: &Path) -> Result<bool, String> {
     let pending = backup.exists() || marker.exists();
     remove_if_present(&candidate)?;
     remove_if_present(&backup_temp)?;
-    if backup.exists() {
-        remove_if_present(&marker)?;
-        remove_if_present(&backup)?;
-    } else {
-        remove_if_present(&backup)?;
-        remove_if_present(&marker)?;
-    }
+    retire_file_durable(&backup)?;
+    retire_file_durable(&marker)?;
     sync_directory(home)?;
     Ok(pending)
 }
@@ -828,7 +912,7 @@ pub fn ce_stop(state: State<'_, AppState>, force: Option<bool>) -> Result<String
             "Desktop will not signal a cross-session PID because it cannot do so race-free."
         };
         return Err(format!(
-            "kumiho_server from a previous Desktop session is still running (PID {}). {context} Stop that PID in Activity Monitor or Task Manager, then retry",
+            "kumiho_server from a previous Desktop session is still running (PID {}). {context} Stop that PID in Activity Monitor (macOS), Task Manager (Windows), or System Monitor (Linux), then retry",
             marker.pid
         ));
     }
@@ -1118,7 +1202,11 @@ mod tests {
         })
         .unwrap();
         write_private_file(&marker_path, &marker).unwrap();
-        assert!(!recorded_ce_running(&home).unwrap());
+        assert!(
+            active_ce_process_marker_with(&home, |_| Ok(Some(identity.clone())), || Ok(false))
+                .unwrap()
+                .is_none()
+        );
         assert!(!marker_path.exists());
 
         let stale = serde_json::to_vec(&CeProcessMarker {
@@ -1127,7 +1215,11 @@ mod tests {
         })
         .unwrap();
         write_private_file(&marker_path, &stale).unwrap();
-        assert!(!recorded_ce_running(&home).unwrap());
+        assert!(
+            active_ce_process_marker_with(&home, |_| Ok(Some(identity)), || Ok(false))
+                .unwrap()
+                .is_none()
+        );
         assert!(!marker_path.exists());
         std::fs::remove_dir_all(home).unwrap();
     }

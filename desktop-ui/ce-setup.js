@@ -14,13 +14,14 @@
     return reachable === true || starting === true;
   }
 
-  function ceControlState(reachable, busy, managed) {
+  function ceControlState(reachable, busy, managed, stoppable) {
     const running = reachable === true;
     const working = busy === true;
     const recovering = managed === true && !running;
+    const manualRecovery = running && stoppable === false;
     return {
       startDisabled: ceStartDisabled(running || recovering, working),
-      restartDisabled: !running || working,
+      restartDisabled: !running || working || manualRecovery,
       stopDisabled: (!running && !recovering) || working,
     };
   }
@@ -88,9 +89,9 @@
 
   async function rollbackPendingCeSetup(options) {
     const { invoke, stopCeAndWait } = options;
-    // The user explicitly chose to retry setup, so this may ask the backend to
-    // inspect a previous-session marker. The backend still refuses PID signals.
-    const stopped = await stopCeAndWait(false);
+    // Force asks the backend to prove the process is down even when status is
+    // already unreachable. Cross-session PIDs still fail closed in ce_stop.
+    const stopped = await stopCeAndWait(true);
     if (stopped !== true) {
       throw new Error('Community Edition process exit was not confirmed; the pending config was preserved');
     }

@@ -238,7 +238,7 @@
           <div class="card">
             <div class="row"><div class="grow"><span class="b">Databases</span> <span class="faint">Docker</span></div><span class="pill" id="docker-pill">…</span></div>
             <div class="row" style="font-size:13px" id="db-lines"></div>
-            <div class="row"><button onclick="dbUp()">Start databases</button><button onclick="cmd('docker_down','general')">Stop databases</button></div>
+            <div class="row"><button id="db-start-btn" onclick="dbUp()">Start databases</button><button id="db-stop-btn" onclick="dbDown()">Stop databases</button></div>
           </div>
           <div class="card">
             <div class="row"><div class="grow"><span class="b">Startup</span> <span class="faint">run Kumiho hands-free</span></div></div>
@@ -335,11 +335,12 @@
       setTimeout(()=>{ btn.textContent=o; btn.classList.remove('primary'); },1600); }catch(e){ btn.textContent='select & copy'; } }
 
   // ---------- first-run setup ----------
-  // One lock covers setup, start, stop, and restart so CE actions cannot race.
+  // One lock covers setup, server/database actions, update, and autoboot.
   let CE_STARTING=false;
   let CE_ACTION='';
   let CE_LAST_REACHABLE=false;
   let CE_LAST_MANAGED=false;
+  let CE_LAST_STOPPABLE=true;
   function validateNeo4jPassword(){ const input=$('f-pass'), help=$('f-pass-help'), error=KumihoDesktopCeSetup.neo4jPasswordError(input.value);
     input.setCustomValidity(error); input.setAttribute('aria-invalid',error?'true':'false'); help.textContent=error||'At least 8 characters.'; help.style.color=error?'var(--bad)':''; return !error; }
   async function pick(m){ $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
@@ -382,7 +383,7 @@
       if(ready){ await invoke('ce_configure_commit'); completed=true; await adoptCE(); return; }
       if(pendingConfig){
         await KumihoDesktopCeSetup.rollbackPendingCeSetup({invoke,stopCeAndWait});
-      }else if(st.reachable) await stopCeAndWait();
+      }else if(st.reachable||st.managed) await stopCeAndWait();
       if(!$('f-eula').checked){ setLog('ce-log','Please accept the EULA to continue.',true); return; }
       const pass=$('f-pass').value.trim(), passError=KumihoDesktopCeSetup.neo4jPasswordError(pass);
       if(passError){ validateNeo4jPassword(); setLog('ce-log',passError,true); return; }
@@ -671,19 +672,24 @@
   }
   async function refreshStartup(){ /* General loads startup values into its draft in reloadSettingsDraft(). */ }
   function renderCeRuntimeStatus(ce){
-    pill($('ce-pill'),ce.reachable,ce.reachable?('v'+(ce.version||'?')):(ce.managed?'starting / recovery needed':(ce.installed?'stopped':'not installed')));
+    const manualRecovery=ce.reachable && ce.stoppable===false;
+    pill($('ce-pill'),ce.reachable,ce.reachable?('v'+(ce.version||'?')+(manualRecovery?' · manual stop required':'')):(ce.managed?'starting / recovery needed':(ce.installed?'stopped':'not installed')));
     $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
-    updateCeControlButtons(ce.reachable,ce.managed);
+    updateCeControlButtons(ce.reachable,ce.managed,ce.stoppable);
   }
-  function updateCeControlButtons(reachable=CE_LAST_REACHABLE,managed=CE_LAST_MANAGED){
+  function updateCeControlButtons(reachable=CE_LAST_REACHABLE,managed=CE_LAST_MANAGED,stoppable=CE_LAST_STOPPABLE){
     CE_LAST_REACHABLE=!!reachable;
     CE_LAST_MANAGED=!!managed;
-    const state=KumihoDesktopCeSetup.ceControlState(CE_LAST_REACHABLE,CE_STARTING,CE_LAST_MANAGED);
-    const start=$('ce-start-btn'), restart=$('ce-restart-btn'), stop=$('ce-stop-btn'), update=$('ce-update-btn');
+    CE_LAST_STOPPABLE=stoppable!==false;
+    const manualRecovery=CE_LAST_REACHABLE&&!CE_LAST_STOPPABLE;
+    const state=KumihoDesktopCeSetup.ceControlState(CE_LAST_REACHABLE,CE_STARTING,CE_LAST_MANAGED,CE_LAST_STOPPABLE);
+    const start=$('ce-start-btn'), restart=$('ce-restart-btn'), stop=$('ce-stop-btn'), update=$('ce-update-btn'), dbStart=$('db-start-btn'), dbStop=$('db-stop-btn');
     if(start){ start.disabled=state.startDisabled; start.textContent=CE_ACTION==='start'?'Starting…':'Start'; start.setAttribute('aria-busy',String(CE_ACTION==='start')); }
-    if(restart){ restart.disabled=state.restartDisabled; restart.textContent=CE_ACTION==='restart'?'Restarting…':'Restart server'; restart.setAttribute('aria-busy',String(CE_ACTION==='restart')); }
-    if(stop){ stop.disabled=state.stopDisabled; stop.textContent=CE_ACTION==='stop'?'Stopping…':'Stop'; stop.setAttribute('aria-busy',String(CE_ACTION==='stop')); }
-    if(update){ update.disabled=CE_STARTING; update.textContent=CE_ACTION==='update'?'Updating…':'Update CE'; update.setAttribute('aria-busy',String(CE_ACTION==='update')); }
+    if(restart){ restart.disabled=state.restartDisabled; restart.textContent=CE_ACTION==='restart'?'Restarting…':'Restart server'; restart.title=manualRecovery?'Stop the server manually before restarting.':''; restart.setAttribute('aria-busy',String(CE_ACTION==='restart')); }
+    if(stop){ stop.disabled=state.stopDisabled; stop.textContent=CE_ACTION==='stop'?(manualRecovery?'Checking…':'Stopping…'):(manualRecovery?'Manual stop steps':'Stop'); stop.title=manualRecovery?'Show the PID and safe manual stop instructions.':''; stop.setAttribute('aria-busy',String(CE_ACTION==='stop')); }
+    if(update){ update.disabled=CE_STARTING||manualRecovery; update.textContent=CE_ACTION==='update'?'Updating…':'Update CE'; update.title=manualRecovery?'Stop the server manually before updating.':''; update.setAttribute('aria-busy',String(CE_ACTION==='update')); }
+    if(dbStart){ dbStart.disabled=CE_STARTING; dbStart.textContent=CE_ACTION==='db-start'?'Starting…':'Start databases'; dbStart.setAttribute('aria-busy',String(CE_ACTION==='db-start')); }
+    if(dbStop){ dbStop.disabled=CE_STARTING; dbStop.textContent=CE_ACTION==='db-stop'?'Stopping…':'Stop databases'; dbStop.setAttribute('aria-busy',String(CE_ACTION==='db-stop')); }
   }
   function beginCeAction(action){ if(CE_STARTING)return false; CE_STARTING=true; CE_ACTION=action; updateCeControlButtons(); return true; }
   async function finishCeAction(checkLatest=true){ CE_STARTING=false; CE_ACTION=''; await (checkLatest?refreshRun():refreshRunLocal()); refreshStatus(); }
@@ -719,15 +725,24 @@
       else setLog('general','Server did not answer within 40s — check Neo4j and try again.',true); }
     catch(e){ setLog('general',String(e),true); toast(String(e),true); }
     finally{ await finishCeAction(); } }
-  async function dbUp(){ const c=await invoke('desktop_config_get'); setLog('general','starting databases…');
-    const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis,timeoutMs:300000});
-    try{ const r=await go(''); setLog('general', r||'✓ databases up'); }
-    catch(e){ const msg=String(e);
-      if(/password/i.test(msg)){ const pass=prompt('Neo4j password (needed to create the database):');
-        if(!pass){ setLog('general','cancelled'); refreshRun(); return; }
-        try{ const r=await go(pass); setLog('general', r||'✓ databases up'); }catch(e2){ setLog('general',String(e2),true); } }
-      else { setLog('general',msg,true); } }
-    refreshRun(); }
+  async function dbUp(){ if(!beginCeAction('db-start'))return; setLog('general','starting databases…');
+    try{ const c=await invoke('desktop_config_get');
+      const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis,timeoutMs:300000});
+      try{ const r=await go(''); setLog('general',r||'✓ databases up'); }
+      catch(e){ const msg=String(e);
+        if(!/password/i.test(msg)) throw e;
+        const pass=prompt('Neo4j password (needed to create the database):');
+        if(!pass){ setLog('general','cancelled'); return; }
+        const r=await go(pass); setLog('general',r||'✓ databases up'); }
+    }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(false); } }
+  async function dbDown(){ if(!beginCeAction('db-stop'))return; setLog('general','stopping databases…');
+    try{ const r=await invoke('docker_down'); const status=await invoke('docker_status');
+      const remaining=[status.neo4j&&'Neo4j',status.redis&&'Redis'].filter(Boolean);
+      if(remaining.length) throw new Error((r?r+'. ':'')+remaining.join(' and ')+' still appears to be running. No database data was removed; check Docker Desktop and retry.');
+      setLog('general',r||'✓ databases stopped'); toast(r||'Databases stopped');
+    }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(false); } }
 
   // The control plane sends no Access-Control-Allow-Origin for the app origin, so
   // a webview fetch is CORS-blocked and would falsely read as unreachable. Probe
