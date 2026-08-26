@@ -687,14 +687,14 @@
   async function startCeAndWait(){
     const current=await invoke('ce_status');
     if(current.reachable){ const up=await ceReady(); return {up,result:up?'Community Edition is already running':'Community Edition is running, but Neo4j is not ready'}; }
-    const result=await invoke('ce_start');
-    const up=await waitFor(ceReady,40000);
-    return {up,result};
+    return KumihoDesktopCeSetup.startCeRuntime({
+      invoke, stopCeAndWait, waitForReady:()=>waitFor(ceReady,40000),
+    });
   }
   async function stopCeAndWait(force=false){
     const current=await invoke('ce_status');
     if(!current.reachable&&!force) return false;
-    await invoke('ce_stop');
+    await invoke('ce_stop',{force});
     const down=await waitFor(()=>invoke('ce_status').then(s=>!s.reachable),10000);
     if(!down) throw new Error('Community Edition did not stop within 10 seconds. It was not restarted.');
     return true;

@@ -10,13 +10,13 @@
 
 use crate::util::{ce_binary, command, kumiho_home};
 use crate::AppState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tauri::State;
+use tauri::{Manager, State};
 
 const CE_PORT: u16 = 9190;
 const BRAIN_PORT: u16 = 8090;
@@ -24,6 +24,13 @@ const CE_CONFIG_FILE: &str = "server.toml";
 const CE_CONFIG_BACKUP_FILE: &str = "server.toml.setup-backup";
 const CE_CONFIG_NEW_MARKER: &str = "server.toml.setup-new";
 const CE_CONFIG_CANDIDATE_FILE: &str = "server.toml.setup-candidate";
+const CE_PROCESS_MARKER_FILE: &str = "ce-process.json";
+
+#[derive(Deserialize, Serialize)]
+struct CeProcessMarker {
+    pid: u32,
+    identity: String,
+}
 
 fn port_open(port: u16) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
@@ -149,6 +156,9 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     #[cfg(unix)]
     let mut file = {
         use std::os::unix::fs::OpenOptionsExt;
+        if path.exists() {
+            restrict_private_file(path)?;
+        }
         std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -165,8 +175,168 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
 }
 
 fn copy_private_file(from: &Path, to: &Path) -> Result<(), String> {
-    std::fs::copy(from, to).map_err(|e| e.to_string())?;
-    restrict_private_file(to)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // If the destination already exists, tighten it before truncating it.
+        // A newly-created destination receives 0600 atomically from open(2), so
+        // password-bearing backups are never briefly world-readable.
+        if to.exists() {
+            restrict_private_file(to)?;
+        }
+        let mut source = std::fs::File::open(from).map_err(|e| e.to_string())?;
+        let mut destination = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(to)
+            .map_err(|e| e.to_string())?;
+        restrict_private_file(to)?;
+        std::io::copy(&mut source, &mut destination).map_err(|e| e.to_string())?;
+        destination.sync_all().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(from, to).map_err(|e| e.to_string())?;
+        restrict_private_file(to)
+    }
+}
+
+fn ce_process_marker_path(home: &Path) -> std::path::PathBuf {
+    home.join(CE_PROCESS_MARKER_FILE)
+}
+
+fn process_identity(pid: u32) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    let output = {
+        let script = format!(
+            "$p=Get-Process -Id {pid} -ErrorAction SilentlyContinue; \
+             if ($null -ne $p) {{ [Console]::Out.Write(\
+             $p.StartTime.ToUniversalTime().Ticks.ToString() + '|' + $p.ProcessName) }}"
+        );
+        command("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .map_err(|e| e.to_string())?
+    };
+    #[cfg(unix)]
+    let output = command("ps")
+        .args([
+            "-p",
+            &pid.to_string(),
+            "-o",
+            "lstart=",
+            "-o",
+            "comm=",
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return match output.status.code() {
+            Some(1) => Ok(None),
+            _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        };
+    }
+    let identity = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!identity.is_empty()).then_some(identity))
+}
+
+fn write_ce_process_marker(home: &Path, pid: u32) -> Result<(), String> {
+    let identity = process_identity(pid)?.ok_or("spawned CE process disappeared")?;
+    if !identity.to_ascii_lowercase().contains("kumiho_server") {
+        return Err("spawned CE process identity did not match kumiho_server".into());
+    }
+    let marker = serde_json::to_vec(&CeProcessMarker { pid, identity })
+        .map_err(|e| e.to_string())?;
+    let path = ce_process_marker_path(home);
+    if let Err(error) = write_private_file(&path, &marker) {
+        let _ = remove_if_present(&path);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn read_ce_process_marker(home: &Path) -> Result<Option<CeProcessMarker>, String> {
+    let path = ce_process_marker_path(home);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| format!("invalid CE process marker: {e}"))
+}
+
+fn remove_ce_process_marker(home: &Path) -> Result<(), String> {
+    remove_if_present(&ce_process_marker_path(home))
+}
+
+fn recorded_ce_running(home: &Path) -> Result<bool, String> {
+    let Some(marker) = read_ce_process_marker(home)? else {
+        return Ok(false);
+    };
+    match process_identity(marker.pid)? {
+        Some(identity) if identity == marker.identity => Ok(true),
+        _ => {
+            remove_ce_process_marker(home)?;
+            Ok(false)
+        }
+    }
+}
+
+fn stop_recorded_ce(home: &Path) -> Result<bool, String> {
+    let Some(marker) = read_ce_process_marker(home)? else {
+        return Ok(false);
+    };
+    match process_identity(marker.pid)? {
+        Some(identity) if identity == marker.identity => {}
+        _ => {
+            remove_ce_process_marker(home)?;
+            return Ok(false);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let output = command("taskkill")
+            .args(["/PID", &marker.pid.to_string(), "/F"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success()
+            && process_identity(marker.pid)?.as_deref() == Some(marker.identity.as_str())
+        {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+    }
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(marker.pid as i32, libc::SIGKILL) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.to_string());
+            }
+        }
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match process_identity(marker.pid)? {
+            Some(identity) if identity == marker.identity => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            _ => {
+                remove_ce_process_marker(home)?;
+                return Ok(true);
+            }
+        }
+    }
+    Err("recorded kumiho_server did not exit within 5 seconds".into())
 }
 
 fn rollback_setup_config_at(home: &Path) -> Result<bool, String> {
@@ -197,7 +367,11 @@ fn stage_setup_config_at(home: &Path, contents: &str) -> Result<(), String> {
     let candidate = home.join(CE_CONFIG_CANDIDATE_FILE);
     write_private_file(&candidate, contents.as_bytes())?;
     let preserve_result = if config.exists() {
-        copy_private_file(&config, &backup)
+        let result = copy_private_file(&config, &backup);
+        if result.is_err() {
+            let _ = remove_if_present(&backup);
+        }
+        result
     } else {
         std::fs::write(&marker, []).map_err(|e| e.to_string())
     };
@@ -369,6 +543,9 @@ pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
     if !cfg.exists() {
         return Err("not configured yet — finish setup first".into());
     }
+    if recorded_ce_running(&home)? {
+        return Ok(format!("recorded kumiho_server already starting on {CE_PORT}"));
+    }
     // Log to a file, not null: a server that dies on a bad config or a wrong
     // Neo4j password must leave its reason somewhere the UI can surface. Best
     // effort — an unwritable log file must not block the start itself.
@@ -382,7 +559,18 @@ pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
         Some((out, err)) => cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err)),
         None => cmd.stdout(Stdio::null()).stderr(Stdio::null()),
     };
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut tracked = state.ce.lock().map_err(|e| e.to_string())?;
+    let child = cmd.spawn().map_err(|e| e.to_string())?;
+    let pid = child.id();
+    *tracked = Some(child);
+    drop(tracked);
+    if let Err(error) = write_ce_process_marker(&home, pid) {
+        if let Some(mut child) = state.ce.lock().map_err(|e| e.to_string())?.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        return Err(error);
+    }
     // Watch until the server serves or dies, so config/auth failures surface as
     // the actual error instead of a generic health-wait timeout. Ten seconds
     // because a wrong Neo4j password only kills the server after driver
@@ -392,15 +580,22 @@ pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
     while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
         if port_open(CE_PORT) {
-            let mut tracked = state.ce.lock().map_err(|e| {
-                let _ = child.kill();
-                let _ = child.wait();
-                e.to_string()
-            })?;
-            *tracked = Some(child);
             return Ok(format!("kumiho_server serving on {CE_PORT}"));
         }
-        if let Ok(Some(status)) = child.try_wait() {
+        let status = {
+            let mut tracked = state.ce.lock().map_err(|e| e.to_string())?;
+            let Some(child) = tracked.as_mut() else {
+                remove_ce_process_marker(&home)?;
+                return Err("kumiho_server was stopped during startup".into());
+            };
+            let status = child.try_wait().map_err(|e| e.to_string())?;
+            if status.is_some() {
+                tracked.take();
+            }
+            status
+        };
+        if let Some(status) = status {
+            remove_ce_process_marker(&home)?;
             let tail = ce_log_tail();
             let mut msg = format!("kumiho_server exited during startup ({status})");
             if !tail.is_empty() {
@@ -409,46 +604,52 @@ pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
             return Err(msg);
         }
     }
-    let mut tracked = state.ce.lock().map_err(|e| {
-        let _ = child.kill();
-        let _ = child.wait();
-        e.to_string()
-    })?;
-    *tracked = Some(child);
     Ok(format!("kumiho_server starting on {CE_PORT}"))
 }
 
 #[tauri::command]
-pub fn ce_stop(state: State<'_, AppState>) -> Result<String, String> {
+pub fn ce_stop(state: State<'_, AppState>, force: Option<bool>) -> Result<String, String> {
+    let home = kumiho_home().ok_or("no home directory")?;
     if let Some(mut child) = state.ce.lock().map_err(|e| e.to_string())?.take() {
         if child.try_wait().map_err(|e| e.to_string())?.is_none() {
             child.kill().map_err(|e| e.to_string())?;
             child.wait().map_err(|e| e.to_string())?;
         }
+        remove_ce_process_marker(&home)?;
         return Ok("tracked kumiho_server stopped".into());
     }
-    if !port_open(CE_PORT) {
-        return Ok("kumiho_server is not running".into());
+    if stop_recorded_ce(&home)? {
+        return Ok("recorded kumiho_server stopped".into());
     }
-    #[cfg(windows)]
-    {
-        let out = command("taskkill")
-            .args(["/IM", "kumiho_server.exe", "/F"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if out.status.success() {
-            Ok("kumiho_server stopped".into())
-        } else {
-            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    if force.unwrap_or(false) || !port_open(CE_PORT) {
+        Ok("kumiho_server is not running".into())
+    } else {
+        Err("the server on port 9190 was not started by this Desktop version; stop that specific process manually before retrying".into())
+    }
+}
+
+/// Avoid leaving an unbound startup child behind when Desktop exits normally.
+/// A healthy committed CE server is intentionally allowed to keep serving.
+pub fn kill_pending_ce(app: &tauri::AppHandle) {
+    let pending = kumiho_home()
+        .map(|home| setup_config_pending_at(&home))
+        .unwrap_or(false);
+    if !pending && port_open(CE_PORT) {
+        return;
+    }
+    let state = app.state::<AppState>();
+    if let Ok(mut tracked) = state.ce.lock() {
+        if let Some(mut child) = tracked.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(home) = kumiho_home() {
+                let _ = remove_ce_process_marker(&home);
+            }
+            return;
         }
-    }
-    #[cfg(not(windows))]
-    {
-        command("pkill")
-            .args(["-f", "kumiho_server"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        Ok("kumiho_server stopped".into())
+    };
+    if let Some(home) = kumiho_home() {
+        let _ = stop_recorded_ce(&home);
     }
 }
 
@@ -658,6 +859,31 @@ mod tests {
         assert!(config.exists());
         assert!(rollback_setup_config_at(&home).unwrap());
         assert!(!config.exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn process_marker_requires_the_exact_pid_identity() {
+        let home = test_home("process-marker");
+        let pid = std::process::id();
+        let identity = process_identity(pid).unwrap().unwrap();
+        let marker_path = ce_process_marker_path(&home);
+        let marker = serde_json::to_vec(&CeProcessMarker {
+            pid,
+            identity: identity.clone(),
+        })
+        .unwrap();
+        write_private_file(&marker_path, &marker).unwrap();
+        assert!(recorded_ce_running(&home).unwrap());
+
+        let stale = serde_json::to_vec(&CeProcessMarker {
+            pid,
+            identity: format!("{identity}-different-process"),
+        })
+        .unwrap();
+        write_private_file(&marker_path, &stale).unwrap();
+        assert!(!recorded_ce_running(&home).unwrap());
+        assert!(!marker_path.exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 

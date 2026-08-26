@@ -94,6 +94,27 @@
     await invoke('ce_configure_rollback');
   }
 
+  async function startCeRuntime(options) {
+    const { invoke, waitForReady, stopCeAndWait } = options;
+    try {
+      const result = await invoke('ce_start');
+      const up = await waitForReady();
+      if (!up) {
+        const stopped = await stopCeAndWait(true);
+        if (stopped !== true) throw new Error('Community Edition process exit was not confirmed');
+      }
+      return { up, result };
+    } catch (error) {
+      try {
+        const stopped = await stopCeAndWait(true);
+        if (stopped !== true) throw new Error('Community Edition process exit was not confirmed');
+      } catch (stopError) {
+        throw new Error(String(error) + '\nCommunity Edition cleanup failed: ' + String(stopError));
+      }
+      throw error;
+    }
+  }
+
   const api = {
     ceControlState,
     ceHealthReady,
@@ -102,6 +123,7 @@
     completeCeSetupStart,
     neo4jPasswordError,
     rollbackPendingCeSetup,
+    startCeRuntime,
   };
   root.KumihoDesktopCeSetup = api;
   if (typeof module !== 'undefined' && module.exports) {

@@ -33,27 +33,55 @@ fn docker_output_with<T>(
     args: &[&str],
     fallbacks: &[&str],
     mut output: impl FnMut(&str, &[&str]) -> io::Result<T>,
+    is_success: impl Fn(&T) -> bool,
 ) -> io::Result<T> {
-    match output("docker", args) {
-        Ok(value) => Ok(value),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut not_found = error;
-            for program in fallbacks {
-                match output(program, args) {
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => not_found = error,
-                    result => return result,
+    let mut unsuccessful = None;
+    let mut first_error = None;
+    let mut substantive_error = None;
+    let mut selected = None;
+    let mut selected_probe = None;
+    for program in std::iter::once("docker").chain(fallbacks.iter().copied()) {
+        match output(program, &["--version"]) {
+            Ok(value) if is_success(&value) => {
+                selected = Some(program.to_string());
+                selected_probe = Some(value);
+                break;
+            }
+            Ok(value) => unsuccessful = Some(value),
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(io::Error::new(error.kind(), error.to_string()));
+                }
+                if error.kind() != io::ErrorKind::NotFound {
+                    substantive_error = Some(error);
                 }
             }
-            Err(not_found)
         }
-        Err(error) => Err(error),
+    }
+    if let Some(program) = selected {
+        if args == ["--version"] {
+            return Ok(selected_probe.expect("a selected Docker CLI has a probe result"));
+        }
+        // Selection is read-only. Execute a state-changing command exactly once
+        // on the selected runtime, even when it returns a non-zero status.
+        return output(&program, args);
+    }
+    if let Some(value) = unsuccessful {
+        Ok(value)
+    } else {
+        Err(substantive_error
+            .or(first_error)
+            .unwrap_or_else(|| io::Error::from(io::ErrorKind::NotFound)))
     }
 }
 
 fn docker_output(args: &[&str]) -> io::Result<std::process::Output> {
-    docker_output_with(args, DOCKER_FALLBACKS, |program, args| {
-        command(program).args(args).output()
-    })
+    docker_output_with(
+        args,
+        DOCKER_FALLBACKS,
+        |program, args| command(program).args(args).output(),
+        |result| result.status.success(),
+    )
 }
 
 fn neo4j_create_password_error(password: &str) -> Option<&'static str> {
@@ -293,10 +321,15 @@ mod tests {
     #[test]
     fn docker_on_process_path_takes_precedence_over_fallbacks() {
         let mut calls = Vec::new();
-        let result = docker_output_with(&["--version"], &["/fallback/docker"], |program, args| {
-            calls.push((program.to_string(), args.join(" ")));
-            Ok("path docker")
-        });
+        let result = docker_output_with(
+            &["--version"],
+            &["/fallback/docker"],
+            |program, args| {
+                calls.push((program.to_string(), args.join(" ")));
+                Ok("path docker")
+            },
+            |_| true,
+        );
 
         assert_eq!(result.unwrap(), "path docker");
         assert_eq!(calls, [("docker".into(), "--version".into())]);
@@ -316,13 +349,15 @@ mod tests {
                     Ok("fallback docker")
                 }
             },
+            |_| true,
         );
 
         assert_eq!(result.unwrap(), "fallback docker");
         assert_eq!(
             calls,
             [
-                ("docker".into(), "inspect neo4j".into()),
+                ("docker".into(), "--version".into()),
+                ("/usr/local/bin/docker".into(), "--version".into()),
                 ("/usr/local/bin/docker".into(), "inspect neo4j".into()),
             ]
         );
@@ -336,14 +371,19 @@ mod tests {
             "/Applications/Docker.app/Contents/Resources/bin/docker",
         ];
         let mut calls = Vec::new();
-        let result = docker_output_with(&["--version"], &fallbacks, |program, args| {
-            calls.push((program.to_string(), args.join(" ")));
-            if program == fallbacks[2] {
-                Ok("Docker Desktop bundle")
-            } else {
-                Err(io::Error::from(io::ErrorKind::NotFound))
-            }
-        });
+        let result = docker_output_with(
+            &["--version"],
+            &fallbacks,
+            |program, args| {
+                calls.push((program.to_string(), args.join(" ")));
+                if program == fallbacks[2] {
+                    Ok("Docker Desktop bundle")
+                } else {
+                    Err(io::Error::from(io::ErrorKind::NotFound))
+                }
+            },
+            |_| true,
+        );
 
         assert_eq!(result.unwrap(), "Docker Desktop bundle");
         assert_eq!(
@@ -358,17 +398,69 @@ mod tests {
     }
 
     #[test]
-    fn non_not_found_error_does_not_switch_docker_runtime() {
+    fn spawn_error_uses_the_next_known_docker_runtime() {
         let mut calls = Vec::new();
-        let error =
-            docker_output_with::<()>(&["--version"], &["/fallback/docker"], |program, _| {
+        let result = docker_output_with(
+            &["--version"],
+            &["/fallback/docker"],
+            |program, _| {
                 calls.push(program.to_string());
-                Err(io::Error::from(io::ErrorKind::PermissionDenied))
-            })
-            .unwrap_err();
+                if program == "docker" {
+                    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+                } else {
+                    Ok("fallback docker")
+                }
+            },
+            |_| true,
+        );
 
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(calls, ["docker"]);
+        assert_eq!(result.unwrap(), "fallback docker");
+        assert_eq!(calls, ["docker", "/fallback/docker"]);
+    }
+
+    #[test]
+    fn unsuccessful_cli_uses_the_next_known_docker_runtime() {
+        let mut calls = Vec::new();
+        let result = docker_output_with(
+            &["--version"],
+            &["/fallback/docker"],
+            |program, _| {
+                calls.push(program.to_string());
+                Ok((program != "docker", program.to_string()))
+            },
+            |result| result.0,
+        );
+
+        assert_eq!(result.unwrap().1, "/fallback/docker");
+        assert_eq!(calls, ["docker", "/fallback/docker"]);
+    }
+
+    #[test]
+    fn state_changing_command_runs_once_on_the_selected_runtime() {
+        let mut calls = Vec::new();
+        let result = docker_output_with(
+            &["start", "neo4j"],
+            &["/fallback/docker", "/another/docker"],
+            |program, args| {
+                calls.push((program.to_string(), args.join(" ")));
+                if args == ["--version"] {
+                    Ok((program == "/fallback/docker", "probe"))
+                } else {
+                    Ok((false, "command failed"))
+                }
+            },
+            |result| result.0,
+        );
+
+        assert_eq!(result.unwrap().1, "command failed");
+        assert_eq!(
+            calls,
+            [
+                ("docker".into(), "--version".into()),
+                ("/fallback/docker".into(), "--version".into()),
+                ("/fallback/docker".into(), "start neo4j".into()),
+            ]
+        );
     }
 
     #[test]

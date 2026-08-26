@@ -113,6 +113,7 @@ fn main() {
             // install/update can't replace it (the reinstall conflict). Kill it
             // as we exit.
             tauri::RunEvent::ExitRequested { .. } => {
+                run::kill_pending_ce(app);
                 run::kill_brain();
                 miho::kill_tracked_miho(app);
             }

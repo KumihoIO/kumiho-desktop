@@ -9,6 +9,7 @@ const {
   completeCeSetupStart,
   neo4jPasswordError,
   rollbackPendingCeSetup,
+  startCeRuntime,
 } = require('../desktop-ui/ce-setup.js');
 
 assert.equal(neo4jPasswordError(''), 'Set a Neo4j password.');
@@ -44,6 +45,8 @@ assert.match(ceSetupFailureMessage('', '', '', true), /did not become ready with
 const html = fs.readFileSync(path.join(__dirname, '..', 'desktop-ui', 'index.html'), 'utf8');
 const ceSetupSource = fs.readFileSync(path.join(__dirname, '..', 'desktop-ui', 'ce-setup.js'), 'utf8');
 const dockerSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'docker.rs'), 'utf8');
+const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'main.rs'), 'utf8');
+const runSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'run.rs'), 'utf8');
 assert.match(html, /<script src="\.\/ce-setup\.js"><\/script>/);
 assert.match(html, /id="f-pass"[^>]*minlength="8"[^>]*oninput="validateNeo4jPassword\(\)"/);
 assert.match(html, /id="f-pass"[^>]*aria-invalid="false"/);
@@ -64,9 +67,10 @@ assert.match(html, /if\(configPending&&!cleanupBlocked\)[\s\S]*await invoke\('ce
 assert.match(ceSetupSource, /await invoke\('ce_start'\)[\s\S]*await invoke\('ce_configure_commit'\)/);
 assert.match(ceSetupSource, /catch \(error\)[\s\S]*await stopCeAndWait\(true\)[\s\S]*await invoke\('ce_configure_rollback'\)/);
 assert.match(html, /async function startCeAndWait\(\)\{[\s\S]*const current=await invoke\('ce_status'\);[\s\S]*if\(current\.reachable\)/);
+assert.match(html, /startCeRuntime\(\{[\s\S]*invoke, stopCeAndWait, waitForReady:\(\)=>waitFor\(ceReady,40000\)/);
 assert.match(html, /async function ceReady\(\)[\s\S]*ceHealthReady\(await invoke\('ce_health'\)\)/);
 assert.match(html, /async function ceStop\(\)\{[\s\S]*beginCeAction\('stop'\)[\s\S]*await finishCeAction\(\)/);
-assert.match(html, /async function stopCeAndWait\(force=false\)\{[\s\S]*!current\.reachable&&!force[\s\S]*await invoke\('ce_stop'\)[\s\S]*!s\.reachable[\s\S]*It was not restarted/);
+assert.match(html, /async function stopCeAndWait\(force=false\)\{[\s\S]*!current\.reachable&&!force[\s\S]*await invoke\('ce_stop',\{force\}\)[\s\S]*!s\.reachable[\s\S]*It was not restarted/);
 assert.match(html, /async function ceRestart\(\)\{[\s\S]*beginCeAction\('restart'\)[\s\S]*await stopCeAndWait\(\)[\s\S]*await startCeAndWait\(\)/);
 assert.doesNotMatch(html, /setTimeout\(\(\)=>cmd\('ce_start'/);
 assert.match(html, /async function ceUpdate\(\)\{[\s\S]*beginCeAction\('update'\)[\s\S]*await finishCeAction\(\)/);
@@ -75,6 +79,12 @@ assert.match(html, /\$\('settings'\)\.classList\.contains\('show'\)[\s\S]*\$\('s
 assert.match(html, /id="ce-log"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.match(html, /id="log-general"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.doesNotMatch(dockerSource, /\["rm",\s*"-f"/, 'managed database containers must never be deleted automatically');
+assert.match(runSource, /struct CeProcessMarker[\s\S]*fn process_identity[\s\S]*fn stop_recorded_ce/);
+assert.match(runSource, /taskkill[\s\S]*"\/PID"[\s\S]*libc::kill\(marker\.pid as i32/);
+assert.match(runSource, /pub fn ce_stop[\s\S]*stop_recorded_ce\(&home\)/);
+assert.doesNotMatch(runSource, /taskkill[\s\S]{0,100}"\/IM",\s*"kumiho_server\.exe"|pkill[\s\S]{0,100}kumiho_server/);
+assert.match(runSource, /pub fn kill_pending_ce[\s\S]*setup_config_pending_at[\s\S]*child\.kill\(\)[\s\S]*child\.wait\(\)/);
+assert.match(mainSource, /RunEvent::ExitRequested[\s\S]*run::kill_pending_ce\(app\)/);
 
 const inlineScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 assert.ok(inlineScripts.length > 0, 'the inline application script should remain present');
@@ -190,6 +200,32 @@ async function testSetupTransactions() {
       /process exit was not confirmed/i,
     );
     assert.deepEqual(calls, []);
+  }
+
+  {
+    const calls = [];
+    let stopCalls = 0;
+    const outcome = await startCeRuntime({
+      invoke: async (command) => { calls.push(command); return 'starting'; },
+      waitForReady: async () => false,
+      stopCeAndWait: async (force) => { assert.equal(force, true); stopCalls += 1; return true; },
+    });
+    assert.deepEqual(outcome, { up: false, result: 'starting' });
+    assert.deepEqual(calls, ['ce_start']);
+    assert.equal(stopCalls, 1);
+  }
+
+  {
+    let stopCalls = 0;
+    await assert.rejects(
+      startCeRuntime({
+        invoke: async () => { throw new Error('spawn failed'); },
+        waitForReady: async () => true,
+        stopCeAndWait: async () => { stopCalls += 1; return true; },
+      }),
+      /spawn failed/i,
+    );
+    assert.equal(stopCalls, 1);
   }
 }
 
