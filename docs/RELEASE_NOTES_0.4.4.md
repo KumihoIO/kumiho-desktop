@@ -16,15 +16,20 @@
   report healthy. Failed starts stop the candidate server and restore the prior
   configuration, so retrying cannot overwrite a known-working password. Desktop
   records the exact startup PID and process-start identity across app restarts;
-  explicit cleanup targets only that process and never every `kumiho_server` on
-  the machine. Automatic recovery fails closed and preserves the pending config
-  whenever process exit cannot be proven.
+  same-session cleanup uses its retained process handle and never kills every
+  `kumiho_server` on the machine. Cross-session recovery never signals a reused
+  PID: it fails closed, preserves the pending config, and gives a manual PID.
+- Config candidates and rollback records are written and published atomically.
+  On macOS and Linux their containing directory is synchronized before the live
+  config changes, keeping the rollback record durable across interrupted setup.
 - Password-bearing candidate, backup, and final configuration files remain
   owner-readable only (`0600`) on macOS and Linux.
 - Start, stop, restart, update, and automatic startup share one action lock.
   Runtime controls now stay disabled while an action is running, and Start is
-  disabled whenever Community Edition is already serving. Automatic startup
-  also waits for the native Docker operation to finish, avoiding overlapping
-  database and server actions after a JavaScript timeout.
+  disabled whenever Community Edition is already serving or has a managed start
+  pending. Automatic startup uses a real native Docker deadline, terminates a
+  stuck CLI child, and preserves the Docker error instead of overlapping the
+  later server action or hiding the root cause.
 - The release workflow runs the new CE setup regression checks on Windows,
-  Linux, Apple silicon macOS, and Intel macOS builds.
+  Linux, Apple silicon macOS, and Intel macOS builds, and rejects a release tag
+  that does not match the Cargo and Tauri versions.

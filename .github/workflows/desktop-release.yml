@@ -25,6 +25,20 @@ jobs:
     outputs:
       release_id: ${{ steps.mk.outputs.result }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify release tag matches Desktop version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#desktop-v}"
+          CARGO_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -n1)
+          TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          test "$GITHUB_REF_NAME" = "desktop-v$TAG_VERSION"
+          test "$TAG_VERSION" = "$CARGO_VERSION"
+          test "$TAG_VERSION" = "$TAURI_VERSION"
+
       - uses: actions/github-script@v7
         id: mk
         env:

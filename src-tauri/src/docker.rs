@@ -7,9 +7,10 @@
 
 use crate::util::{command, kumiho_home};
 use serde::Serialize;
-use std::io;
+use std::io::{self, Read};
 use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
+use std::process::{Output, Stdio};
+use std::time::{Duration, Instant};
 
 /// Candidate container names, most-specific first. The first entry is the one
 /// we create ourselves when nothing exists.
@@ -18,6 +19,12 @@ const REDIS_NAMES: &[&str] = &["kumiho-ce-redis", "kumiho-redis", "redis"];
 const NEO4J_DEFAULT: u16 = 7687;
 const REDIS_DEFAULT: u16 = 6379;
 const NEO4J_MIN_PASSWORD_LENGTH: usize = 8;
+const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const DOCKER_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+const DOCKER_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
+const DOCKER_SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DOCKER_MIN_TIMEOUT_MS: u64 = 1_000;
+const DOCKER_MAX_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 
 #[cfg(target_os = "macos")]
 const DOCKER_FALLBACKS: &[&str] = &[
@@ -75,11 +82,112 @@ fn docker_output_with<T>(
     }
 }
 
-fn docker_output(args: &[&str]) -> io::Result<std::process::Output> {
+#[derive(Clone, Copy)]
+struct DockerDeadline {
+    expires_at: Instant,
+}
+
+impl DockerDeadline {
+    fn after(duration: Duration) -> Self {
+        Self {
+            expires_at: Instant::now() + duration,
+        }
+    }
+
+    fn remaining(self) -> io::Result<Duration> {
+        self.expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "Docker operation timed out"))
+    }
+
+    fn capped(self, duration: Duration) -> Self {
+        Self {
+            expires_at: self.expires_at.min(Instant::now() + duration),
+        }
+    }
+}
+
+fn join_output_reader(
+    reader: std::thread::JoinHandle<io::Result<Vec<u8>>>,
+) -> io::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other("Docker output reader panicked"))?
+}
+
+fn docker_command_output(
+    program: &str,
+    args: &[&str],
+    deadline: DockerDeadline,
+) -> io::Result<Output> {
+    let mut child = command(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("Docker stdout was not captured"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("Docker stderr was not captured"))?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    });
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Output {
+                status,
+                stdout: join_output_reader(stdout_reader)?,
+                stderr: join_output_reader(stderr_reader)?,
+            });
+        }
+        let remaining = match deadline.remaining() {
+            Ok(remaining) => remaining,
+            Err(timeout) => {
+                if let Err(kill_error) = child.kill() {
+                    if child.try_wait()?.is_none() {
+                        return Err(io::Error::other(format!(
+                            "{timeout}; Docker CLI termination failed: {kill_error}"
+                        )));
+                    }
+                } else {
+                    child.wait()?;
+                }
+                // Killing the CLI closes both pipes. Drain/join them before
+                // returning so no reader threads outlive this invocation.
+                let _ = join_output_reader(stdout_reader);
+                let _ = join_output_reader(stderr_reader);
+                return Err(timeout);
+            }
+        };
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    }
+}
+
+fn docker_output(args: &[&str], deadline: DockerDeadline) -> io::Result<Output> {
     docker_output_with(
         args,
         DOCKER_FALLBACKS,
-        |program, args| command(program).args(args).output(),
+        |program, command_args| {
+            let command_deadline = if command_args == ["--version"] {
+                deadline.capped(DOCKER_PROBE_TIMEOUT)
+            } else {
+                deadline
+            };
+            docker_command_output(program, command_args, command_deadline)
+        },
         |result| result.status.success(),
     )
 }
@@ -101,10 +209,8 @@ fn port_serving(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
 }
 
-fn docker_available() -> bool {
-    docker_output(&["--version"])
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+fn docker_available(deadline: DockerDeadline) -> io::Result<bool> {
+    docker_output(&["--version"], deadline).map(|output| output.status.success())
 }
 
 /// Actionable, platform-aware guidance when Docker is needed but missing.
@@ -120,24 +226,24 @@ fn docker_missing_message() -> String {
     )
 }
 
-fn container_exists(name: &str) -> bool {
-    docker_output(&["inspect", "-f", "{{.State.Status}}", name])
+fn container_exists(name: &str, deadline: DockerDeadline) -> bool {
+    docker_output(&["inspect", "-f", "{{.State.Status}}", name], deadline)
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
-fn container_running(name: &str) -> bool {
-    docker_output(&["inspect", "-f", "{{.State.Running}}", name])
+fn container_running(name: &str, deadline: DockerDeadline) -> bool {
+    docker_output(&["inspect", "-f", "{{.State.Running}}", name], deadline)
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
 }
 
 /// The first existing container among the candidates — so we manage the one you
 /// already have instead of creating a duplicate under a different name.
-fn find_container(cands: &[&str]) -> Option<String> {
+fn find_container(cands: &[&str], deadline: DockerDeadline) -> Option<String> {
     cands
         .iter()
-        .find(|n| container_exists(n))
+        .find(|n| container_exists(n, deadline))
         .map(|n| (*n).to_string())
 }
 
@@ -150,10 +256,14 @@ pub struct DockerStatus {
 
 #[tauri::command]
 pub fn docker_status() -> DockerStatus {
-    let available = docker_available();
+    let deadline = DockerDeadline::after(DOCKER_STATUS_TIMEOUT);
+    let available = docker_available(deadline).unwrap_or(false);
     let running = |cands: &[&str], port: u16| {
         port_serving(port)
-            || (available && find_container(cands).map(|n| container_running(&n)).unwrap_or(false))
+            || (available
+                && find_container(cands, deadline)
+                    .map(|name| container_running(&name, deadline))
+                    .unwrap_or(false))
     };
     DockerStatus {
         available,
@@ -212,7 +322,13 @@ pub fn docker_up(
     redis_port: u16,
     neo4j_password: String,
     use_redis: bool,
+    timeout_ms: Option<u64>,
 ) -> Result<String, String> {
+    let timeout = timeout_ms
+        .map(|value| value.clamp(DOCKER_MIN_TIMEOUT_MS, DOCKER_MAX_TIMEOUT_MS))
+        .map(Duration::from_millis)
+        .unwrap_or(DOCKER_SETUP_TIMEOUT);
+    let deadline = DockerDeadline::after(timeout);
     let neo4j_password = if neo4j_password.trim().is_empty() {
         stored_neo4j_password().unwrap_or_default()
     } else {
@@ -221,8 +337,12 @@ pub fn docker_up(
     let need_neo4j = !port_serving(neo4j_port);
     let need_redis = use_redis && !port_serving(redis_port);
 
-    if (need_neo4j || need_redis) && !docker_available() {
-        return Err(docker_missing_message());
+    if need_neo4j || need_redis {
+        let available = docker_available(deadline)
+            .map_err(|error| format!("Docker check failed: {error}"))?;
+        if !available {
+            return Err(docker_missing_message());
+        }
     }
 
     let mut notes: Vec<String> = Vec::new();
@@ -242,6 +362,7 @@ pub fn docker_up(
             &create,
             neo4j_create_password_error(&neo4j_password),
             "Neo4j",
+            deadline,
         )?);
     } else {
         notes.push(format!("Neo4j already serving {neo4j_port} — reusing"));
@@ -256,7 +377,13 @@ pub fn docker_up(
                 "-p".into(), format!("127.0.0.1:{redis_port}:6379"),
                 "redis:7".into(),
             ];
-            notes.push(start_or_create(REDIS_NAMES, &create, None, "Redis")?);
+            notes.push(start_or_create(
+                REDIS_NAMES,
+                &create,
+                None,
+                "Redis",
+                deadline,
+            )?);
         } else {
             notes.push(format!("Redis already serving {redis_port} — reusing"));
         }
@@ -272,10 +399,11 @@ fn start_or_create(
     create_args: &[String],
     create_error: Option<&str>,
     label: &str,
+    deadline: DockerDeadline,
 ) -> Result<String, String> {
-    if let Some(name) = find_container(cands) {
-        let out =
-            docker_output(&["start", &name]).map_err(|e| format!("docker not available: {e}"))?;
+    if let Some(name) = find_container(cands, deadline) {
+        let out = docker_output(&["start", &name], deadline)
+            .map_err(|e| format!("Docker command failed: {e}"))?;
         if out.status.success() {
             return Ok(format!("{label} container '{name}' started"));
         }
@@ -288,7 +416,7 @@ fn start_or_create(
         return Err(error.to_string());
     }
     let args: Vec<&str> = create_args.iter().map(|s| s.as_str()).collect();
-    let out = docker_output(&args).map_err(|e| format!("docker not available: {e}"))?;
+    let out = docker_output(&args, deadline).map_err(|e| format!("Docker command failed: {e}"))?;
     if out.status.success() {
         Ok(format!("{label} container '{}' created", cands[0]))
     } else {
@@ -298,10 +426,11 @@ fn start_or_create(
 
 #[tauri::command]
 pub fn docker_down() -> Result<String, String> {
+    let deadline = DockerDeadline::after(DOCKER_ACTION_TIMEOUT);
     let mut stopped: Vec<String> = Vec::new();
     for cands in [NEO4J_NAMES, REDIS_NAMES] {
-        if let Some(name) = find_container(cands) {
-            let out = docker_output(&["stop", &name]);
+        if let Some(name) = find_container(cands, deadline) {
+            let out = docker_output(&["stop", &name], deadline);
             if out.map(|o| o.status.success()).unwrap_or(false) {
                 stopped.push(name);
             }
@@ -484,6 +613,27 @@ mod tests {
             Some("eight chars")
         );
         assert_eq!(decode_saved_toml_string(r#""bad\nvalue""#), None);
+    }
+
+    #[test]
+    fn bounded_docker_command_terminates_a_hung_cli_child() {
+        #[cfg(windows)]
+        let (program, args): (&str, &[&str]) = (
+            "powershell",
+            &["-NoProfile", "-Command", "Start-Sleep -Seconds 30"],
+        );
+        #[cfg(unix)]
+        let (program, args): (&str, &[&str]) = ("/bin/sleep", &["30"]);
+
+        let started = Instant::now();
+        let error = docker_command_output(
+            program,
+            args,
+            DockerDeadline::after(Duration::from_millis(100)),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[cfg(target_os = "macos")]

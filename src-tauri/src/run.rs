@@ -60,6 +60,8 @@ fn http_get_json(port: u16, path: &str) -> Option<serde_json::Value> {
 #[derive(Serialize)]
 pub struct CeStatus {
     pub reachable: bool,
+    /// Desktop has a durable process/launch record, even if 9190 is not bound yet.
+    pub managed: bool,
     pub port: u16,
     pub version: Option<String>,
     pub mode: Option<String>,
@@ -72,11 +74,21 @@ pub struct CeStatus {
 #[tauri::command]
 pub fn ce_status() -> CeStatus {
     let live = http_get_json(CE_PORT, "/api/_live");
-    let configured = kumiho_home()
-        .map(|h| h.join("server.toml").exists())
+    let home = kumiho_home();
+    let configured = home
+        .as_ref()
+        .map(|home| home.join(CE_CONFIG_FILE).exists())
+        .unwrap_or(false);
+    let managed = home
+        .as_ref()
+        .map(|home| {
+            home.join(CE_PROCESS_MARKER_FILE).exists()
+                || home.join(CE_PROCESS_INTENT_FILE).exists()
+        })
         .unwrap_or(false);
     CeStatus {
         reachable: live.is_some() || port_open(CE_PORT),
+        managed,
         port: CE_PORT,
         version: live
             .as_ref()
@@ -141,6 +153,18 @@ fn remove_if_present(path: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
     }
+}
+
+fn sync_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(path)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| error.to_string())?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn restrict_private_file(path: &Path) -> Result<(), String> {
@@ -228,6 +252,21 @@ fn write_private_file_atomic(path: &Path, contents: &[u8]) -> Result<(), String>
         let _ = remove_if_present(&temporary);
         return Err(error.to_string());
     }
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn publish_private_file(source: &Path, destination: &Path) -> Result<(), String> {
+    restrict_private_file(source)?;
+    #[cfg(not(unix))]
+    remove_if_present(destination)?;
+    std::fs::rename(source, destination).map_err(|error| error.to_string())?;
+    restrict_private_file(destination)?;
+    if let Some(parent) = destination.parent() {
+        sync_directory(parent)?;
+    }
     Ok(())
 }
 
@@ -241,7 +280,8 @@ fn ce_process_intent_path(home: &Path) -> std::path::PathBuf {
 
 fn remove_ce_process_records(home: &Path) -> Result<(), String> {
     remove_if_present(&ce_process_marker_path(home))?;
-    remove_if_present(&ce_process_intent_path(home))
+    remove_if_present(&ce_process_intent_path(home))?;
+    sync_directory(home)
 }
 
 fn any_ce_process_running() -> Result<bool, String> {
@@ -357,11 +397,16 @@ fn read_ce_process_marker(home: &Path) -> Result<Option<CeProcessMarker>, String
 }
 
 fn remove_ce_process_marker(home: &Path) -> Result<(), String> {
-    remove_if_present(&ce_process_marker_path(home))
+    remove_if_present(&ce_process_marker_path(home))?;
+    sync_directory(home)
 }
 
 fn ce_process_identity_matches(expected: &str, current: Option<&str>) -> bool {
     current == Some(expected) && expected.to_ascii_lowercase().contains("kumiho_server")
+}
+
+fn is_ce_process_identity(identity: &str) -> bool {
+    identity.to_ascii_lowercase().contains("kumiho_server")
 }
 
 fn active_ce_process_marker(home: &Path) -> Result<Option<CeProcessMarker>, String> {
@@ -374,7 +419,16 @@ fn active_ce_process_marker(home: &Path) -> Result<Option<CeProcessMarker>, Stri
             remove_if_present(&ce_process_intent_path(home))?;
             Ok(Some(marker))
         }
+        Some(identity) if is_ce_process_identity(&identity) => {
+            return Err(format!(
+                "kumiho_server PID {} is still present, but its start identity changed; recovery was preserved for manual inspection",
+                marker.pid
+            ));
+        }
         _ => {
+            if any_ce_process_running()? {
+                return Err("the recorded CE PID is gone or changed, but another kumiho_server process exists; recovery was preserved for manual inspection".into());
+            }
             remove_ce_process_marker(home)?;
             Ok(None)
         }
@@ -383,59 +437,6 @@ fn active_ce_process_marker(home: &Path) -> Result<Option<CeProcessMarker>, Stri
 
 fn recorded_ce_running(home: &Path) -> Result<bool, String> {
     Ok(active_ce_process_marker(home)?.is_some())
-}
-
-fn stop_recorded_ce(home: &Path) -> Result<bool, String> {
-    let Some(marker) = read_ce_process_marker(home)? else {
-        return Ok(false);
-    };
-    match process_identity(marker.pid)? {
-        identity if ce_process_identity_matches(&marker.identity, identity.as_deref()) => {}
-        _ => {
-            remove_ce_process_marker(home)?;
-            return Ok(false);
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        let output = command("taskkill")
-            .args(["/PID", &marker.pid.to_string(), "/F"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !output.status.success()
-            && ce_process_identity_matches(
-                &marker.identity,
-                process_identity(marker.pid)?.as_deref(),
-            )
-        {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-        }
-    }
-    #[cfg(unix)]
-    {
-        let result = unsafe { libc::kill(marker.pid as i32, libc::SIGKILL) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error.to_string());
-            }
-        }
-    }
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        match process_identity(marker.pid)? {
-            identity if ce_process_identity_matches(&marker.identity, identity.as_deref()) => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            _ => {
-                remove_ce_process_records(home)?;
-                return Ok(true);
-            }
-        }
-    }
-    Err("recorded kumiho_server did not exit within 5 seconds".into())
 }
 
 fn stop_child_and_confirm(child: &mut std::process::Child) -> Result<(), String> {
@@ -479,10 +480,12 @@ fn rollback_setup_config_at(home: &Path) -> Result<bool, String> {
     let marker = home.join(CE_CONFIG_NEW_MARKER);
     let candidate = home.join(CE_CONFIG_CANDIDATE_FILE);
     let restored = if backup.exists() {
-        copy_private_file(&backup, &config)?;
+        copy_private_file(&backup, &candidate)?;
+        publish_private_file(&candidate, &config)?;
         true
     } else if marker.exists() {
         remove_if_present(&config)?;
+        sync_directory(home)?;
         true
     } else {
         false
@@ -491,6 +494,7 @@ fn rollback_setup_config_at(home: &Path) -> Result<bool, String> {
     remove_if_present(&backup_temp)?;
     remove_if_present(&marker)?;
     remove_if_present(&candidate)?;
+    sync_directory(home)?;
     Ok(restored)
 }
 
@@ -504,7 +508,9 @@ fn stage_setup_config_at(home: &Path, contents: &str) -> Result<(), String> {
     write_private_file(&candidate, contents.as_bytes())?;
     let preserve_result = if config.exists() {
         let result = copy_private_file(&config, &backup_temp).and_then(|()| {
-            std::fs::rename(&backup_temp, &backup).map_err(|e| e.to_string())
+            std::fs::rename(&backup_temp, &backup)
+                .map_err(|e| e.to_string())
+                .and_then(|()| sync_directory(home))
         });
         if result.is_err() {
             let _ = remove_if_present(&backup_temp);
@@ -512,17 +518,17 @@ fn stage_setup_config_at(home: &Path, contents: &str) -> Result<(), String> {
         }
         result
     } else {
-        std::fs::write(&marker, []).map_err(|e| e.to_string())
+        write_private_file(&marker, b"new config").and_then(|()| sync_directory(home))
     };
     if let Err(error) = preserve_result {
         let _ = remove_if_present(&candidate);
         return Err(error);
     }
-    if let Err(error) = copy_private_file(&candidate, &config) {
+    if let Err(error) = publish_private_file(&candidate, &config) {
         let _ = rollback_setup_config_at(home);
         return Err(error);
     }
-    remove_if_present(&candidate)
+    Ok(())
 }
 
 fn commit_setup_config_at(home: &Path) -> Result<bool, String> {
@@ -540,6 +546,7 @@ fn commit_setup_config_at(home: &Path) -> Result<bool, String> {
         remove_if_present(&backup)?;
         remove_if_present(&marker)?;
     }
+    sync_directory(home)?;
     Ok(pending)
 }
 
@@ -725,6 +732,7 @@ pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
     let mut tracked = state.ce.lock().map_err(|e| e.to_string())?;
     let intent_path = ce_process_intent_path(&home);
     write_private_file(&intent_path, b"starting")?;
+    sync_directory(&home)?;
     let child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -813,13 +821,19 @@ pub fn ce_stop(state: State<'_, AppState>, force: Option<bool>) -> Result<String
         }
     }
 
+    if let Some(marker) = active_ce_process_marker(&home)? {
+        let context = if force.unwrap_or(false) {
+            "The pending config was preserved."
+        } else {
+            "Desktop will not signal a cross-session PID because it cannot do so race-free."
+        };
+        return Err(format!(
+            "kumiho_server from a previous Desktop session is still running (PID {}). {context} Stop that PID in Activity Monitor or Task Manager, then retry",
+            marker.pid
+        ));
+    }
+
     if force.unwrap_or(false) {
-        if let Some(marker) = active_ce_process_marker(&home)? {
-            return Err(format!(
-                "kumiho_server from a previous Desktop session is still running (PID {}). The pending config was preserved; stop that PID in Activity Monitor or Task Manager, then retry",
-                marker.pid
-            ));
-        }
         if uncertain_ce_launch(&home)? {
             return Err("an interrupted Community Edition launch may still be running. The pending config was preserved; stop that specific kumiho_server process, then retry".into());
         }
@@ -829,9 +843,6 @@ pub fn ce_stop(state: State<'_, AppState>, force: Option<bool>) -> Result<String
         return Ok("kumiho_server is not running".into());
     }
 
-    if stop_recorded_ce(&home)? {
-        return Ok("recorded kumiho_server stopped".into());
-    }
     if uncertain_ce_launch(&home)? {
         return Err("an interrupted Community Edition launch may still be running; stop that specific kumiho_server process manually before retrying".into());
     }
@@ -1075,6 +1086,23 @@ mod tests {
         assert!(config.exists());
         assert!(rollback_setup_config_at(&home).unwrap());
         assert!(!config.exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn incomplete_backup_temp_is_never_used_for_rollback() {
+        let home = test_home("partial-backup-temp");
+        let config = home.join(CE_CONFIG_FILE);
+        let backup_temp = home.join(CE_CONFIG_BACKUP_TEMP_FILE);
+        std::fs::write(&config, "db_pass = \"original\"\n").unwrap();
+        std::fs::write(&backup_temp, "partial").unwrap();
+
+        assert!(!rollback_setup_config_at(&home).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "db_pass = \"original\"\n"
+        );
+        assert!(!backup_temp.exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 

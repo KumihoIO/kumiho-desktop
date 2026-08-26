@@ -14,13 +14,14 @@
     return reachable === true || starting === true;
   }
 
-  function ceControlState(reachable, busy) {
+  function ceControlState(reachable, busy, managed) {
     const running = reachable === true;
     const working = busy === true;
+    const recovering = managed === true && !running;
     return {
-      startDisabled: ceStartDisabled(running, working),
+      startDisabled: ceStartDisabled(running || recovering, working),
       restartDisabled: !running || working,
-      stopDisabled: !running || working,
+      stopDisabled: (!running && !recovering) || working,
     };
   }
 
@@ -87,7 +88,9 @@
 
   async function rollbackPendingCeSetup(options) {
     const { invoke, stopCeAndWait } = options;
-    const stopped = await stopCeAndWait(true);
+    // The user explicitly chose to retry setup, so this may ask the backend to
+    // inspect a previous-session marker. The backend still refuses PID signals.
+    const stopped = await stopCeAndWait(false);
     if (stopped !== true) {
       throw new Error('Community Edition process exit was not confirmed; the pending config was preserved');
     }
@@ -118,8 +121,9 @@
   async function startCeAutoboot(options) {
     const { startDatabases, startServer } = options;
     // A Tauri invoke cannot be cancelled by Promise.race. Wait for the native
-    // Docker operation to settle so it cannot overlap the CE server start.
-    try { await startDatabases(); } catch (_) {}
+    // Docker operation to settle so it cannot overlap the CE server start. The
+    // backend owns the real timeout and terminates its CLI child on expiry.
+    await startDatabases();
     return startServer();
   }
 

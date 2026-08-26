@@ -339,14 +339,17 @@
   let CE_STARTING=false;
   let CE_ACTION='';
   let CE_LAST_REACHABLE=false;
+  let CE_LAST_MANAGED=false;
   function validateNeo4jPassword(){ const input=$('f-pass'), help=$('f-pass-help'), error=KumihoDesktopCeSetup.neo4jPasswordError(input.value);
     input.setCustomValidity(error); input.setAttribute('aria-invalid',error?'true':'false'); help.textContent=error||'At least 8 characters.'; help.style.color=error?'var(--bad)':''; return !error; }
   async function pick(m){ $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
     $('ce-form').style.display = m==='ce'?'block':'none'; $('cloud-form').style.display = m==='cloud'?'block':'none';
     if(m==='ce'){ const btn=$('ce-btn');
       if(btn) btn.disabled=CE_STARTING;
-      try{ const st=await invoke('ce_status');
-        if(st.reachable){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
+      try{ const st=await invoke('ce_status'), ready=st.reachable && await ceReady();
+        if(ready){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
+        else if(st.reachable){ setLog('ce-log','Community Edition is running, but Neo4j is not ready. Start will safely stop it and retry setup.',true); if(btn) btn.textContent='Repair & restart Community Edition'; }
+        else if(st.managed){ setLog('ce-log','A previous Community Edition start is still pending. Retry will preserve the config unless that process can be handled safely.'); if(btn) btn.textContent='Recover Community Edition'; }
         else if(btn){ btn.textContent = st.installed ? 'Start Community Edition' : 'Install & start Community Edition'; }
       }catch(e){}
       // Docker heads-up + copy-paste install chips — only when a DB isn't already up and Docker is missing
@@ -389,7 +392,7 @@
       markStep('install','active');
       if(!st.installed){ setLog('ce-log','Installing CE server…'); await invoke('ce_install'); }
       markStep('install','done'); markStep('db','active'); setLog('ce-log','Starting Neo4j + Redis in Docker (first run may pull images)…');
-      const databaseResult=await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis });
+      const databaseResult=await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis, timeoutMs:900000 });
       markStep('db','done'); markStep('config','active');
       setLog('ce-log','Writing config…');
       await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true });
@@ -668,13 +671,14 @@
   }
   async function refreshStartup(){ /* General loads startup values into its draft in reloadSettingsDraft(). */ }
   function renderCeRuntimeStatus(ce){
-    pill($('ce-pill'),ce.reachable,ce.reachable?('v'+(ce.version||'?')):(ce.installed?'stopped':'not installed'));
+    pill($('ce-pill'),ce.reachable,ce.reachable?('v'+(ce.version||'?')):(ce.managed?'starting / recovery needed':(ce.installed?'stopped':'not installed')));
     $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
-    updateCeControlButtons(ce.reachable);
+    updateCeControlButtons(ce.reachable,ce.managed);
   }
-  function updateCeControlButtons(reachable=CE_LAST_REACHABLE){
+  function updateCeControlButtons(reachable=CE_LAST_REACHABLE,managed=CE_LAST_MANAGED){
     CE_LAST_REACHABLE=!!reachable;
-    const state=KumihoDesktopCeSetup.ceControlState(CE_LAST_REACHABLE,CE_STARTING);
+    CE_LAST_MANAGED=!!managed;
+    const state=KumihoDesktopCeSetup.ceControlState(CE_LAST_REACHABLE,CE_STARTING,CE_LAST_MANAGED);
     const start=$('ce-start-btn'), restart=$('ce-restart-btn'), stop=$('ce-stop-btn'), update=$('ce-update-btn');
     if(start){ start.disabled=state.startDisabled; start.textContent=CE_ACTION==='start'?'Starting…':'Start'; start.setAttribute('aria-busy',String(CE_ACTION==='start')); }
     if(restart){ restart.disabled=state.restartDisabled; restart.textContent=CE_ACTION==='restart'?'Restarting…':'Restart server'; restart.setAttribute('aria-busy',String(CE_ACTION==='restart')); }
@@ -693,7 +697,7 @@
   }
   async function stopCeAndWait(force=false){
     const current=await invoke('ce_status');
-    if(!current.reachable&&!force) return false;
+    if(!current.reachable&&!current.managed&&!force) return false;
     await invoke('ce_stop',{force});
     const down=await waitFor(()=>invoke('ce_status').then(s=>!s.reachable),10000);
     if(!down) throw new Error('Community Edition did not stop within 10 seconds. It was not restarted.');
@@ -716,7 +720,7 @@
     catch(e){ setLog('general',String(e),true); toast(String(e),true); }
     finally{ await finishCeAction(); } }
   async function dbUp(){ const c=await invoke('desktop_config_get'); setLog('general','starting databases…');
-    const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis});
+    const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis,timeoutMs:300000});
     try{ const r=await go(''); setLog('general', r||'✓ databases up'); }
     catch(e){ const msg=String(e);
       if(/password/i.test(msg)){ const pass=prompt('Neo4j password (needed to create the database):');
@@ -957,13 +961,13 @@
               const {up}=await KumihoDesktopCeSetup.startCeAutoboot({
                 startDatabases:async()=>{
                   const slow=setTimeout(()=>toast('Docker setup is taking longer than expected. Community Edition will start after this step finishes.'),25000);
-                  try{ return await invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis}); }
+                  try{ return await invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis,timeoutMs:30000}); }
                   finally{ clearTimeout(slow); }
                 },
                 startServer:startCeAndWait,
               });
               if(!up) toast('Community Edition did not become ready and was stopped — open Settings → General to retry.', true);
-            } catch(e){ toast('Community Edition could not start automatically: '+String(e),true); }
+            } catch(e){ const message='Community Edition could not start automatically: '+String(e); setLog('general',message,true); toast(message,true); }
             finally { await finishCeAction(false); }
           }
         }
