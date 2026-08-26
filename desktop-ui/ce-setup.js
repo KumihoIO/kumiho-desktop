@@ -18,7 +18,7 @@
     const running = reachable === true;
     const working = busy === true;
     const recovering = managed === true && !running;
-    const manualRecovery = running && stoppable === false;
+    const manualRecovery = stoppable === false && (running || managed === true);
     return {
       startDisabled: ceStartDisabled(running || recovering, working),
       restartDisabled: !running || working || manualRecovery,

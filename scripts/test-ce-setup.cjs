@@ -59,6 +59,9 @@ const dockerSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'sr
 const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'main.rs'), 'utf8');
 const runSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'run.rs'), 'utf8');
 const releaseWorkflowSource = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'desktop-release.yml'), 'utf8');
+const releaseCiSource = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'desktop-ci.yml'), 'utf8');
+const releaseGateSource = fs.readFileSync(path.join(__dirname, 'verify-desktop-release.cjs'), 'utf8');
+const releaseGateTestSource = fs.readFileSync(path.join(__dirname, 'test-desktop-release-gate.cjs'), 'utf8');
 assert.match(html, /<script src="\.\/ce-setup\.js"><\/script>/);
 assert.match(html, /id="f-pass"[^>]*minlength="8"[^>]*oninput="validateNeo4jPassword\(\)"/);
 assert.match(html, /id="f-pass"[^>]*aria-invalid="false"/);
@@ -84,7 +87,9 @@ assert.match(html, /async function ceReady\(\)[\s\S]*ceHealthReady\(await invoke
 assert.match(html, /async function ceStop\(\)\{[\s\S]*beginCeAction\('stop'\)[\s\S]*await finishCeAction\(\)/);
 assert.match(html, /async function stopCeAndWait\(force=false\)\{[\s\S]*!current\.reachable&&!current\.managed&&!force[\s\S]*await invoke\('ce_stop',\{force\}\)[\s\S]*!s\.reachable[\s\S]*It was not restarted/);
 assert.match(html, /async function ceRestart\(\)\{[\s\S]*beginCeAction\('restart'\)[\s\S]*await stopCeAndWait\(\)[\s\S]*await startCeAndWait\(\)/);
-assert.match(html, /manualRecovery=CE_LAST_REACHABLE&&!CE_LAST_STOPPABLE[\s\S]*Manual stop steps[\s\S]*update\.disabled=CE_STARTING\|\|manualRecovery/);
+assert.match(html, /manualRecovery=!CE_LAST_STOPPABLE&&\(CE_LAST_REACHABLE\|\|CE_LAST_MANAGED\)[\s\S]*Manual stop \/ recovery steps[\s\S]*update\.disabled=CE_STARTING\|\|manualRecovery/);
+assert.match(html, /st\.reachable&&st\.stoppable===false[\s\S]*Desktop will not signal that process/);
+assert.match(html, /st\.managed&&st\.stoppable===false[\s\S]*Recover \/ manual stop steps/);
 assert.match(html, /async function dbUp\(\)\{ if\(!beginCeAction\('db-start'\)\)return;[\s\S]*finally\{ await finishCeAction\(false\); \} \}/);
 assert.match(html, /async function dbDown\(\)\{ if\(!beginCeAction\('db-stop'\)\)return;[\s\S]*invoke\('docker_down'\)[\s\S]*invoke\('docker_status'\)[\s\S]*still appears to be running[\s\S]*finally\{ await finishCeAction\(false\); \} \}/);
 assert.doesNotMatch(html, /setTimeout\(\(\)=>cmd\('ce_start'/);
@@ -100,9 +105,10 @@ assert.match(html, /id="ce-log"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.match(html, /id="log-general"[^>]*role="status"[^>]*aria-live="polite"/);
 assert.doesNotMatch(dockerSource, /\["rm",\s*"-f"/, 'managed database containers must never be deleted automatically');
 assert.match(dockerSource, /fn docker_command_output[\s\S]*child\.try_wait\(\)[\s\S]*child\.kill\(\)[\s\S]*ErrorKind::TimedOut/);
-assert.match(dockerSource, /fn receive_output[\s\S]*recv_timeout[\s\S]*pub async fn docker_status[\s\S]*spawn_blocking[\s\S]*pub async fn docker_up[\s\S]*spawn_blocking/);
+assert.match(dockerSource, /DOCKER_CAPTURE_LIMIT[\s\S]*struct DockerCapture[\s\S]*fn read_bounded[\s\S]*pub async fn docker_status[\s\S]*spawn_blocking[\s\S]*pub async fn docker_up[\s\S]*spawn_blocking/);
+assert.doesNotMatch(dockerSource, /fn spawn_output_reader|fn receive_output/);
 assert.match(dockerSource, /timeout_ms:\s*Option<u64>[\s\S]*DockerDeadline::after/);
-assert.match(dockerSource, /fn docker_down_blocking[\s\S]*docker_available[\s\S]*"info"[\s\S]*find_container_checked[\s\S]*could not stop/);
+assert.match(dockerSource, /fn inspect_found[\s\S]*no such object[\s\S]*Docker inspect failed[\s\S]*fn docker_down_blocking[\s\S]*find_container_checked[\s\S]*could not stop/);
 assert.match(runSource, /fn neo4j_password_error[\s\S]*NEO4J_MIN_PASSWORD_LENGTH[\s\S]*pub fn ce_configure[\s\S]*neo4j_password_error\(&neo4j_password\)/);
 assert.match(runSource, /struct CeProcessMarker[\s\S]*fn process_identity[\s\S]*fn active_ce_process_marker/);
 assert.match(runSource, /CE_PROCESS_INTENT_FILE[\s\S]*write_private_file\(&intent_path, b"starting"\)[\s\S]*sync_directory\(&home\)[\s\S]*cmd\.spawn\(\)[\s\S]*write_ce_process_marker/);
@@ -114,8 +120,12 @@ assert.match(runSource, /pub struct CeStatus[\s\S]*pub managed: bool[\s\S]*pub s
 assert.match(runSource, /fn sync_directory[\s\S]*directory\.sync_all[\s\S]*fn publish_private_file[\s\S]*move_file_durable\(source, destination, true\)/);
 assert.match(runSource, /pub fn kill_pending_ce[\s\S]*state\.ce_start\.lock[\s\S]*setup_config_pending_at[\s\S]*stop_tracked_child/);
 assert.match(mainSource, /RunEvent::ExitRequested[\s\S]*run::kill_pending_ce\(app\)/);
-assert.match(releaseWorkflowSource, /Verify release tag matches Desktop version[\s\S]*GITHUB_REF_TYPE[\s\S]*refs\/tags[\s\S]*TAG_VERSION[\s\S]*CARGO_VERSION[\s\S]*TAURI_VERSION/);
-assert.match(releaseWorkflowSource, /getRef\(\{ owner, repo, ref: `tags\/\$\{tag\}` \}\)/);
+assert.match(releaseWorkflowSource, /Verify release tag matches Desktop version[\s\S]*LOCAL_TAG_COMMIT[\s\S]*node scripts\/verify-desktop-release\.cjs/);
+assert.match(releaseWorkflowSource, /EXPECTED_SHA: \$\{\{ github\.sha \}\}[\s\S]*getRef\(\{ owner, repo, ref: `tags\/\$\{tag\}` \}\)[\s\S]*ensureDraftRelease/);
+assert.doesNotMatch(releaseWorkflowSource, /if:\s*github\.ref_type\s*==\s*'tag'/);
+assert.match(releaseGateSource, /localTagCommit !== expectedSha[\s\S]*resolveRemoteTagCommit[\s\S]*target_commitish:[\s\S]*assertRemoteTagCommit/);
+assert.match(releaseGateTestSource, /refType: 'branch'[\s\S]*localTagCommit: MOVED_SHA[\s\S]*postChecks/);
+assert.match(releaseCiSource, /pull_request:[\s\S]*windows-latest[\s\S]*ubuntu-22\.04[\s\S]*macos-15[\s\S]*macos-15-intel[\s\S]*cargo test --manifest-path src-tauri\/Cargo\.toml --locked/);
 
 const inlineScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 assert.ok(inlineScripts.length > 0, 'the inline application script should remain present');

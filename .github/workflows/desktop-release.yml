@@ -31,58 +31,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF_TYPE" != "tag" ]]; then
-            echo "::error::Desktop releases must run from an existing tag. For a manual run, dispatch with --ref desktop-vX.Y.Z instead of a branch."
-            exit 1
-          fi
-
+          test -n "$GITHUB_REF_TYPE"
           RELEASE_TAG="$GITHUB_REF_NAME"
-          if [[ "$RELEASE_TAG" != desktop-v* ]]; then
-            echo "::error::Release tag must start with desktop-v: $RELEASE_TAG"
-            exit 1
-          fi
-
+          LOCAL_TAG_COMMIT="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}" || true)"
           TAG_VERSION="${RELEASE_TAG#desktop-v}"
-          SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$'
-          if [[ ! "$TAG_VERSION" =~ $SEMVER_RE ]]; then
-            echo "::error::Release tag is not valid SemVer: $RELEASE_TAG"
-            exit 1
-          fi
-
-          if ! git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null; then
-            echo "::error::Release tag was not checked out: $RELEASE_TAG"
-            exit 1
-          fi
-
           CARGO_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -n1)
           TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          if [[ "$TAG_VERSION" != "$CARGO_VERSION" || "$TAG_VERSION" != "$TAURI_VERSION" ]]; then
-            echo "::error::Release tag version $TAG_VERSION does not match Cargo $CARGO_VERSION and Tauri $TAURI_VERSION"
-            exit 1
-          fi
+          export LOCAL_TAG_COMMIT TAG_VERSION CARGO_VERSION TAURI_VERSION
+          node scripts/verify-desktop-release.cjs
 
       - uses: actions/github-script@v7
         id: mk
         env:
           TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
         with:
           script: |
             const { owner, repo } = context.repo
             const tag = process.env.TAG
-            // Refuse to let createRelease synthesize a missing tag.
-            await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` })
-            // Re-runs must reuse the release, not add another one.
-            const all = await github.paginate(github.rest.repos.listReleases, { owner, repo })
-            const found = all.find(r => r.tag_name === tag)
-            if (found) return found.id
-            const { data } = await github.rest.repos.createRelease({
-              owner, repo,
-              tag_name: tag,
-              name: `Kumiho Desktop ${tag}`,
-              draft: true,
-              prerelease: false,
+            const gate = require(`${process.env.GITHUB_WORKSPACE}/scripts/verify-desktop-release.cjs`)
+            const initialRef = await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` })
+            return await gate.ensureDraftRelease({
+              github, owner, repo, tag,
+              expectedSha: process.env.EXPECTED_SHA,
+              initialRef,
             })
-            return data.id
 
   release:
     needs: create-release
@@ -125,6 +98,7 @@ jobs:
         run: |
           node scripts/test-active-server-health.cjs
           node scripts/test-ce-setup.cjs
+          node scripts/test-desktop-release-gate.cjs
           node scripts/test-html5-file-drop.cjs
           node scripts/test-9miho-update.cjs
 

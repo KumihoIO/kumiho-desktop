@@ -349,8 +349,10 @@
       if(btn) btn.disabled=CE_STARTING;
       try{ const st=await invoke('ce_status'), ready=st.reachable && await ceReady();
         if(ready){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
-        else if(st.reachable){ setLog('ce-log','Community Edition is running, but Neo4j is not ready. Start will safely stop it and retry setup.',true); if(btn) btn.textContent='Repair & restart Community Edition'; }
-        else if(st.managed){ setLog('ce-log','A previous Community Edition start is still pending. Retry will preserve the config unless that process can be handled safely.'); if(btn) btn.textContent='Recover Community Edition'; }
+        else if(st.reachable&&st.stoppable===false){ setLog('ce-log','Community Edition is running outside this Desktop session, but Neo4j is not ready. Recovery will show safe manual stop steps; Desktop will not signal that process.',true); if(btn) btn.textContent='Show manual recovery steps'; }
+        else if(st.reachable){ setLog('ce-log','Community Edition is running, but Neo4j is not ready. Repair will stop this Desktop session’s server and retry setup.',true); if(btn) btn.textContent='Repair & restart Community Edition'; }
+        else if(st.managed&&st.stoppable===false){ setLog('ce-log','A previous Community Edition start needs recovery. Continue to inspect it and show manual stop steps if it is still running; the pending config will be preserved.'); if(btn) btn.textContent='Recover / manual stop steps'; }
+        else if(st.managed){ setLog('ce-log','A Community Edition start from this Desktop session is still pending. Retry will stop it before changing the config.'); if(btn) btn.textContent='Recover Community Edition'; }
         else if(btn){ btn.textContent = st.installed ? 'Start Community Edition' : 'Install & start Community Edition'; }
       }catch(e){}
       // Docker heads-up + copy-paste install chips — only when a DB isn't already up and Docker is missing
@@ -672,8 +674,8 @@
   }
   async function refreshStartup(){ /* General loads startup values into its draft in reloadSettingsDraft(). */ }
   function renderCeRuntimeStatus(ce){
-    const manualRecovery=ce.reachable && ce.stoppable===false;
-    pill($('ce-pill'),ce.reachable,ce.reachable?('v'+(ce.version||'?')+(manualRecovery?' · manual stop required':'')):(ce.managed?'starting / recovery needed':(ce.installed?'stopped':'not installed')));
+    const manualRecovery=ce.stoppable===false && (ce.reachable||ce.managed);
+    pill($('ce-pill'),ce.reachable,ce.reachable?('v'+(ce.version||'?')+(manualRecovery?' · manual stop required':'')):(ce.managed?(manualRecovery?'manual stop / recovery required':'starting / recovery needed'):(ce.installed?'stopped':'not installed')));
     $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
     updateCeControlButtons(ce.reachable,ce.managed,ce.stoppable);
   }
@@ -681,12 +683,12 @@
     CE_LAST_REACHABLE=!!reachable;
     CE_LAST_MANAGED=!!managed;
     CE_LAST_STOPPABLE=stoppable!==false;
-    const manualRecovery=CE_LAST_REACHABLE&&!CE_LAST_STOPPABLE;
+    const manualRecovery=!CE_LAST_STOPPABLE&&(CE_LAST_REACHABLE||CE_LAST_MANAGED);
     const state=KumihoDesktopCeSetup.ceControlState(CE_LAST_REACHABLE,CE_STARTING,CE_LAST_MANAGED,CE_LAST_STOPPABLE);
     const start=$('ce-start-btn'), restart=$('ce-restart-btn'), stop=$('ce-stop-btn'), update=$('ce-update-btn'), dbStart=$('db-start-btn'), dbStop=$('db-stop-btn');
     if(start){ start.disabled=state.startDisabled; start.textContent=CE_ACTION==='start'?'Starting…':'Start'; start.setAttribute('aria-busy',String(CE_ACTION==='start')); }
     if(restart){ restart.disabled=state.restartDisabled; restart.textContent=CE_ACTION==='restart'?'Restarting…':'Restart server'; restart.title=manualRecovery?'Stop the server manually before restarting.':''; restart.setAttribute('aria-busy',String(CE_ACTION==='restart')); }
-    if(stop){ stop.disabled=state.stopDisabled; stop.textContent=CE_ACTION==='stop'?(manualRecovery?'Checking…':'Stopping…'):(manualRecovery?'Manual stop steps':'Stop'); stop.title=manualRecovery?'Show the PID and safe manual stop instructions.':''; stop.setAttribute('aria-busy',String(CE_ACTION==='stop')); }
+    if(stop){ stop.disabled=state.stopDisabled; stop.textContent=CE_ACTION==='stop'?(manualRecovery?'Checking…':'Stopping…'):(manualRecovery?'Manual stop / recovery steps':'Stop'); stop.title=manualRecovery?'Inspect the recorded process and show safe manual recovery steps.':''; stop.setAttribute('aria-busy',String(CE_ACTION==='stop')); }
     if(update){ update.disabled=CE_STARTING||manualRecovery; update.textContent=CE_ACTION==='update'?'Updating…':'Update CE'; update.title=manualRecovery?'Stop the server manually before updating.':''; update.setAttribute('aria-busy',String(CE_ACTION==='update')); }
     if(dbStart){ dbStart.disabled=CE_STARTING; dbStart.textContent=CE_ACTION==='db-start'?'Starting…':'Start databases'; dbStart.setAttribute('aria-busy',String(CE_ACTION==='db-start')); }
     if(dbStop){ dbStop.disabled=CE_STARTING; dbStop.textContent=CE_ACTION==='db-stop'?'Stopping…':'Stop databases'; dbStop.setAttribute('aria-busy',String(CE_ACTION==='db-stop')); }

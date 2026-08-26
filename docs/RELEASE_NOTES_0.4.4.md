@@ -34,7 +34,8 @@
   native deadline, terminates a stuck CLI child, bounds inherited output pipes,
   and preserves the Docker error instead of overlapping the later server action
   or hiding the root cause.
-- The release workflow runs the new CE setup regression checks on Windows,
-  Linux, Apple silicon macOS, and Intel macOS builds, and rejects a release tag
-  that does not match the Cargo and Tauri versions. Manual runs must also start
-  from an existing release tag, so they cannot synthesize a branch-named release.
+- Pull requests and releases run the CE regression suite on Windows, Linux,
+  Apple silicon macOS, and Intel macOS. Release jobs require an existing tag
+  whose peeled commit, workflow SHA, Cargo version, and Tauri version all match;
+  that identity is checked again around draft-release creation so a moved tag
+  cannot attach artifacts built from another commit.

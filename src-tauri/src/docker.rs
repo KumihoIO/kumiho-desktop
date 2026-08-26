@@ -7,11 +7,12 @@
 
 use crate::util::{command, kumiho_home};
 use serde::Serialize;
-use std::io::{self, Read};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpStream};
+use std::path::PathBuf;
 use std::process::{Output, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Candidate container names, most-specific first. The first entry is the one
 /// we create ourselves when nothing exists.
@@ -26,6 +27,9 @@ const DOCKER_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 const DOCKER_SETUP_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const DOCKER_MIN_TIMEOUT_MS: u64 = 1_000;
 const DOCKER_MAX_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
+const DOCKER_CAPTURE_LIMIT: u64 = 1024 * 1024;
+const DOCKER_CAPTURE_CREATE_ATTEMPTS: usize = 128;
+static NEXT_DOCKER_CAPTURE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
 const DOCKER_FALLBACKS: &[&str] = &[
@@ -109,30 +113,70 @@ impl DockerDeadline {
     }
 }
 
-fn spawn_output_reader(mut reader: impl Read + Send + 'static) -> Receiver<io::Result<Vec<u8>>> {
-    let (sender, receiver) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = reader.read_to_end(&mut bytes).map(|_| bytes);
-        let _ = sender.send(result);
-    });
-    receiver
+struct DockerCapture {
+    path: PathBuf,
+    writer: Option<std::fs::File>,
 }
 
-fn receive_output(
-    reader: Receiver<io::Result<Vec<u8>>>,
-    deadline: DockerDeadline,
-) -> io::Result<Vec<u8>> {
-    let remaining = deadline.remaining()?;
-    match reader.recv_timeout(remaining) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Docker output drain timed out",
-        )),
-        Err(RecvTimeoutError::Disconnected) => Err(io::Error::other(
-            "Docker output reader stopped unexpectedly",
-        )),
+impl DockerCapture {
+    fn create(stream: &str) -> io::Result<Self> {
+        let directory = std::env::temp_dir();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for _ in 0..DOCKER_CAPTURE_CREATE_ATTEMPTS {
+            let id = NEXT_DOCKER_CAPTURE_ID.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!(
+                "kumiho-docker-{}-{nonce}-{id}-{stream}.tmp",
+                std::process::id()
+            ));
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(writer) => {
+                    return Ok(Self {
+                        path,
+                        writer: Some(writer),
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a unique Docker output capture",
+        ))
+    }
+
+    fn take_stdio(&mut self) -> io::Result<Stdio> {
+        self.writer
+            .take()
+            .map(Stdio::from)
+            .ok_or_else(|| io::Error::other("Docker output capture was already attached"))
+    }
+
+    fn read_bounded(&self) -> io::Result<Vec<u8>> {
+        let mut file = std::fs::File::open(&self.path)?;
+        let length = file.metadata()?.len();
+        let capture_length = length.min(DOCKER_CAPTURE_LIMIT);
+        file.seek(SeekFrom::Start(length.saturating_sub(capture_length)))?;
+        let mut bytes = Vec::with_capacity(capture_length as usize);
+        file.take(capture_length).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+impl Drop for DockerCapture {
+    fn drop(&mut self) {
+        drop(self.writer.take());
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -141,29 +185,25 @@ fn docker_command_output(
     args: &[&str],
     deadline: DockerDeadline,
 ) -> io::Result<Output> {
+    let mut stdout_capture = DockerCapture::create("stdout")?;
+    let mut stderr_capture = DockerCapture::create("stderr")?;
     let mut child = command(program)
         .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(stdout_capture.take_stdio()?)
+        .stderr(stderr_capture.take_stdio()?)
         .spawn()?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("Docker stdout was not captured"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("Docker stderr was not captured"))?;
-    let stdout_reader = spawn_output_reader(stdout);
-    let stderr_reader = spawn_output_reader(stderr);
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                deadline.remaining()?;
+                let stdout = stdout_capture.read_bounded()?;
+                deadline.remaining()?;
+                let stderr = stderr_capture.read_bounded()?;
                 return Ok(Output {
                     status,
-                    stdout: receive_output(stdout_reader, deadline)?,
-                    stderr: receive_output(stderr_reader, deadline)?,
+                    stdout,
+                    stderr,
                 });
             }
             Ok(None) => {}
@@ -185,9 +225,8 @@ fn docker_command_output(
                 } else {
                     child.wait()?;
                 }
-                // Reader results arrive over channels. Do not join here: a
-                // descendant may have inherited a pipe even after the direct
-                // Docker CLI child has been terminated.
+                // Capture files are regular files, so descendants retaining an
+                // inherited output handle cannot keep this invocation alive.
                 return Err(timeout);
             }
         };
@@ -273,11 +312,33 @@ fn find_container_checked(
     for name in cands {
         let output = docker_output(&["inspect", "-f", "{{.State.Status}}", name], deadline)
             .map_err(|error| format!("Docker inspect failed: {error}"))?;
-        if output.status.success() {
-            return Ok(Some((*name).to_string()));
+        match inspect_found(name, &output)? {
+            true => return Ok(Some((*name).to_string())),
+            false => continue,
         }
     }
     Ok(None)
+}
+
+fn inspect_found(name: &str, output: &Output) -> Result<bool, String> {
+    if output.status.success() {
+        return Ok(true);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.to_ascii_lowercase().contains("no such object") {
+        return Ok(false);
+    }
+
+    Err(format!(
+        "Docker inspect failed for '{name}' ({}): {}",
+        output.status,
+        if stderr.is_empty() {
+            "Docker returned no diagnostic output"
+        } else {
+            &stderr
+        }
+    ))
 }
 
 #[derive(Serialize)]
@@ -543,6 +604,23 @@ fn docker_down_blocking(deadline: DockerDeadline) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    const DESCENDANT_STOP_ENV: &str = "KUMIHO_DOCKER_TEST_DESCENDANT_STOP";
+
+    fn failed_output(stderr: &str) -> Output {
+        #[cfg(windows)]
+        let mut output = command("cmd")
+            .args(["/D", "/C", "exit /b 17"])
+            .output()
+            .expect("create a failed Windows process output");
+        #[cfg(unix)]
+        let mut output = command("/bin/sh")
+            .args(["-c", "exit 17"])
+            .output()
+            .expect("create a failed Unix process output");
+        output.stderr = stderr.as_bytes().to_vec();
+        output
+    }
+
     #[test]
     fn docker_on_process_path_takes_precedence_over_fallbacks() {
         let mut calls = Vec::new();
@@ -709,6 +787,56 @@ mod tests {
     }
 
     #[test]
+    fn failed_inspect_is_absent_only_for_an_explicit_no_such_object_error() {
+        assert_eq!(
+            inspect_found(
+                "kumiho-ce-neo4j",
+                &failed_output("Error: No such object: kumiho-ce-neo4j")
+            ),
+            Ok(false)
+        );
+
+        let daemon_error = inspect_found(
+            "kumiho-ce-neo4j",
+            &failed_output("error during connect: Docker daemon is unavailable"),
+        )
+        .unwrap_err();
+        assert!(daemon_error.contains("kumiho-ce-neo4j"));
+        assert!(daemon_error.contains("17"));
+        assert!(daemon_error.contains("Docker daemon is unavailable"));
+
+        let permission_error = inspect_found(
+            "kumiho-ce-neo4j",
+            &failed_output("permission denied while trying to connect"),
+        )
+        .unwrap_err();
+        assert!(permission_error.contains("permission denied"));
+    }
+
+    #[test]
+    fn docker_capture_reads_a_bounded_tail_and_removes_its_file() {
+        use std::io::Write;
+
+        let mut capture = DockerCapture::create("bounded-test").expect("create Docker capture");
+        let capture_path = capture.path.clone();
+        let mut payload = vec![b'a'; DOCKER_CAPTURE_LIMIT as usize + 37];
+        payload[..37].fill(b'x');
+        capture
+            .writer
+            .as_mut()
+            .expect("capture writer")
+            .write_all(&payload)
+            .expect("write capture payload");
+
+        let captured = capture.read_bounded().expect("read bounded capture");
+        assert_eq!(captured.len(), DOCKER_CAPTURE_LIMIT as usize);
+        assert_eq!(captured, payload[37..]);
+
+        drop(capture);
+        assert!(!capture_path.exists());
+    }
+
+    #[test]
     fn bounded_docker_command_terminates_a_hung_direct_cli_child() {
         #[cfg(windows)]
         let (program, args): (&str, &[&str]) = (
@@ -730,50 +858,92 @@ mod tests {
     }
 
     #[test]
-    fn bounded_docker_command_does_not_wait_for_descendant_inherited_pipe() {
+    fn bounded_docker_command_does_not_wait_for_descendant_output_handle() {
         // Run a short-lived copy of this test binary which starts another copy
-        // that inherits its stdout/stderr and stays alive. Joining the reader
-        // threads would therefore ignore the command deadline until the
-        // descendant exits.
+        // that inherits its stdout/stderr and stays alive until the sentinel is
+        // written. A watchdog releases the helper even if this regresses, so
+        // the test itself cannot leave an immortal child behind.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let stop_path = std::env::temp_dir().join(format!(
+            "kumiho-docker-descendant-stop-{}-{nonce}",
+            std::process::id()
+        ));
+        let done_path = stop_path.with_extension("done");
+        let _ = std::fs::remove_file(&stop_path);
+        let _ = std::fs::remove_file(&done_path);
+        std::env::set_var(DESCENDANT_STOP_ENV, &stop_path);
+
+        let (finished_sender, finished_receiver) = std::sync::mpsc::sync_channel(1);
+        let watchdog_stop_path = stop_path.clone();
+        let watchdog = std::thread::spawn(move || {
+            let _ = finished_receiver.recv_timeout(Duration::from_secs(4));
+            std::fs::write(watchdog_stop_path, b"stop")
+        });
+
         let test_executable = std::env::current_exe().expect("current test executable");
         let test_program = test_executable
             .to_str()
             .expect("UTF-8 test executable path");
         let started = Instant::now();
-        let error = docker_command_output(
+        let output = docker_command_output(
             test_program,
             &[
                 "--ignored",
                 "--exact",
-                "docker::tests::descendant_pipe_spawner_helper",
+                "docker::tests::descendant_output_spawner_helper",
                 "--nocapture",
             ],
             DockerDeadline::after(Duration::from_secs(1)),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(3));
+        );
+        let elapsed = started.elapsed();
+        let _ = finished_sender.send(());
+        let watchdog_result = watchdog.join().expect("descendant watchdog thread");
+
+        let holder_deadline = Instant::now() + Duration::from_secs(3);
+        while !done_path.exists() && Instant::now() < holder_deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let holder_stopped = done_path.exists();
+        std::env::remove_var(DESCENDANT_STOP_ENV);
+        let _ = std::fs::remove_file(&stop_path);
+        let _ = std::fs::remove_file(&done_path);
+
+        watchdog_result.expect("release descendant output holder");
+        let output = output.expect("capture should not wait for descendant output handles");
+        assert!(output.status.success());
+        assert!(elapsed < Duration::from_secs(3));
+        assert!(holder_stopped, "descendant output holder did not stop");
     }
 
     #[test]
-    #[ignore = "process helper for the descendant-pipe regression test"]
-    fn descendant_pipe_spawner_helper() {
+    #[ignore = "process helper for the descendant-output regression test"]
+    fn descendant_output_spawner_helper() {
         let test_executable = std::env::current_exe().expect("current test executable");
         std::process::Command::new(test_executable)
             .args([
                 "--ignored",
                 "--exact",
-                "docker::tests::descendant_pipe_holder_helper",
+                "docker::tests::descendant_output_holder_helper",
                 "--nocapture",
             ])
             .spawn()
-            .expect("spawn descendant pipe holder");
+            .expect("spawn descendant output holder");
     }
 
     #[test]
-    #[ignore = "process helper for the descendant-pipe regression test"]
-    fn descendant_pipe_holder_helper() {
-        std::thread::sleep(Duration::from_secs(4));
+    #[ignore = "process helper for the descendant-output regression test"]
+    fn descendant_output_holder_helper() {
+        let Some(stop_path) = std::env::var_os(DESCENDANT_STOP_ENV).map(PathBuf::from) else {
+            return;
+        };
+        while !stop_path.exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::fs::write(stop_path.with_extension("done"), b"done")
+            .expect("acknowledge descendant output holder shutdown");
     }
 
     #[cfg(target_os = "macos")]
