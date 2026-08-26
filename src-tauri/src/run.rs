@@ -13,12 +13,17 @@ use crate::AppState;
 use serde::Serialize;
 use std::io::{Read, Seek, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tauri::State;
 
 const CE_PORT: u16 = 9190;
 const BRAIN_PORT: u16 = 8090;
+const CE_CONFIG_FILE: &str = "server.toml";
+const CE_CONFIG_BACKUP_FILE: &str = "server.toml.setup-backup";
+const CE_CONFIG_NEW_MARKER: &str = "server.toml.setup-new";
+const CE_CONFIG_CANDIDATE_FILE: &str = "server.toml.setup-candidate";
 
 fn port_open(port: u16) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
@@ -116,8 +121,86 @@ pub fn ce_install() -> Result<String, String> {
     }
 }
 
-/// Write `~/.kumiho/server.toml` from the setup modal (bypasses interactive
-/// onboard). Keys match the onboard wizard's output.
+pub(crate) fn escape_toml_basic_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn rollback_setup_config_at(home: &Path) -> Result<bool, String> {
+    let config = home.join(CE_CONFIG_FILE);
+    let backup = home.join(CE_CONFIG_BACKUP_FILE);
+    let marker = home.join(CE_CONFIG_NEW_MARKER);
+    let candidate = home.join(CE_CONFIG_CANDIDATE_FILE);
+    let restored = if backup.exists() {
+        std::fs::copy(&backup, &config).map_err(|e| e.to_string())?;
+        true
+    } else if marker.exists() {
+        remove_if_present(&config)?;
+        true
+    } else {
+        false
+    };
+    remove_if_present(&backup)?;
+    remove_if_present(&marker)?;
+    remove_if_present(&candidate)?;
+    Ok(restored)
+}
+
+fn stage_setup_config_at(home: &Path, contents: &str) -> Result<(), String> {
+    rollback_setup_config_at(home)?;
+    let config = home.join(CE_CONFIG_FILE);
+    let backup = home.join(CE_CONFIG_BACKUP_FILE);
+    let marker = home.join(CE_CONFIG_NEW_MARKER);
+    let candidate = home.join(CE_CONFIG_CANDIDATE_FILE);
+    std::fs::write(&candidate, contents).map_err(|e| e.to_string())?;
+    let preserve_result = if config.exists() {
+        std::fs::copy(&config, &backup)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    } else {
+        std::fs::write(&marker, []).map_err(|e| e.to_string())
+    };
+    if let Err(error) = preserve_result {
+        let _ = remove_if_present(&candidate);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::copy(&candidate, &config) {
+        let _ = rollback_setup_config_at(home);
+        return Err(error.to_string());
+    }
+    remove_if_present(&candidate)
+}
+
+fn commit_setup_config_at(home: &Path) -> Result<bool, String> {
+    let backup = home.join(CE_CONFIG_BACKUP_FILE);
+    let marker = home.join(CE_CONFIG_NEW_MARKER);
+    let candidate = home.join(CE_CONFIG_CANDIDATE_FILE);
+    let pending = backup.exists() || marker.exists();
+    remove_if_present(&candidate)?;
+    if backup.exists() {
+        remove_if_present(&marker)?;
+        remove_if_present(&backup)?;
+    } else {
+        remove_if_present(&backup)?;
+        remove_if_present(&marker)?;
+    }
+    Ok(pending)
+}
+
+fn setup_config_pending_at(home: &Path) -> bool {
+    home.join(CE_CONFIG_BACKUP_FILE).exists() || home.join(CE_CONFIG_NEW_MARKER).exists()
+}
+
+/// Stage `~/.kumiho/server.toml` from the setup modal (bypasses interactive
+/// onboard). The UI commits it only after CE connects; otherwise the previous
+/// config is restored. Keys match the onboard wizard's output.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub fn ce_configure(
@@ -137,7 +220,6 @@ pub fn ce_configure(
     }
     let home = kumiho_home().ok_or("no home directory")?;
     std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let mut toml = String::new();
     toml.push_str("deployment_mode = \"self_hosted_ce\"\n");
     toml.push_str("eula_accepted = true\n");
@@ -146,15 +228,52 @@ pub fn ce_configure(
     toml.push_str(&format!("neo4j_port = {neo4j_port}\n"));
     toml.push_str("db_name = \"neo4j\"\n");
     toml.push_str("db_user = \"neo4j\"\n");
-    toml.push_str(&format!("db_pass = \"{}\"\n", esc(neo4j_password.trim())));
-    toml.push_str(&format!("local_user = \"{}\"\n", esc(local_user.trim())));
-    toml.push_str(&format!("local_email = \"{}\"\n", esc(local_email.trim())));
+    toml.push_str(&format!(
+        "db_pass = \"{}\"\n",
+        escape_toml_basic_string(neo4j_password.trim())
+    ));
+    toml.push_str(&format!(
+        "local_user = \"{}\"\n",
+        escape_toml_basic_string(local_user.trim())
+    ));
+    toml.push_str(&format!(
+        "local_email = \"{}\"\n",
+        escape_toml_basic_string(local_email.trim())
+    ));
     if let Some(rp) = redis_port {
         toml.push_str(&format!("redis_port = {rp}\n"));
     }
-    let path = home.join("server.toml");
-    std::fs::write(&path, toml).map_err(|e| e.to_string())?;
+    let path = home.join(CE_CONFIG_FILE);
+    stage_setup_config_at(&home, &toml)?;
     Ok(format!("wrote {}", path.display()))
+}
+
+#[tauri::command]
+pub fn ce_configure_commit() -> Result<String, String> {
+    let home = kumiho_home().ok_or("no home directory")?;
+    let committed = commit_setup_config_at(&home)?;
+    Ok(if committed {
+        "Community Edition config committed".into()
+    } else {
+        "no pending Community Edition config".into()
+    })
+}
+
+#[tauri::command]
+pub fn ce_configure_rollback() -> Result<String, String> {
+    let home = kumiho_home().ok_or("no home directory")?;
+    let restored = rollback_setup_config_at(&home)?;
+    Ok(if restored {
+        "previous Community Edition config restored".into()
+    } else {
+        "no pending Community Edition config".into()
+    })
+}
+
+#[tauri::command]
+pub fn ce_configure_pending() -> Result<bool, String> {
+    let home = kumiho_home().ok_or("no home directory")?;
+    Ok(setup_config_pending_at(&home))
 }
 
 /// `~/.kumiho/logs/kumiho_server.log` — fresh per start, written by `ce_start`.
@@ -376,8 +495,9 @@ pub fn brain_stop(state: State<AppState>) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::log_tail_text;
+    use super::*;
     use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(name);
@@ -415,5 +535,61 @@ mod tests {
         let tail = log_tail_text(&path, 2);
         std::fs::remove_file(&path).ok();
         assert_eq!(tail, "two\nthree");
+    }
+
+    fn test_home(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!(
+            "kumiho-desktop-run-test-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    #[test]
+    fn setup_config_restores_the_previous_file_until_committed() {
+        let home = test_home("existing-config");
+        let config = home.join(CE_CONFIG_FILE);
+        std::fs::write(&config, "db_pass = \"original\"\n").unwrap();
+
+        stage_setup_config_at(&home, "db_pass = \"candidate\"\n").unwrap();
+        assert!(setup_config_pending_at(&home));
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "db_pass = \"candidate\"\n"
+        );
+        assert!(rollback_setup_config_at(&home).unwrap());
+        assert!(!setup_config_pending_at(&home));
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "db_pass = \"original\"\n"
+        );
+
+        stage_setup_config_at(&home, "db_pass = \"accepted\"\n").unwrap();
+        assert!(setup_config_pending_at(&home));
+        assert!(commit_setup_config_at(&home).unwrap());
+        assert!(!setup_config_pending_at(&home));
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "db_pass = \"accepted\"\n"
+        );
+        assert!(!home.join(CE_CONFIG_BACKUP_FILE).exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn failed_first_setup_removes_the_uncommitted_config() {
+        let home = test_home("new-config");
+        let config = home.join(CE_CONFIG_FILE);
+
+        stage_setup_config_at(&home, "db_pass = \"candidate\"\n").unwrap();
+        assert!(config.exists());
+        assert!(rollback_setup_config_at(&home).unwrap());
+        assert!(!config.exists());
+        std::fs::remove_dir_all(home).unwrap();
     }
 }
