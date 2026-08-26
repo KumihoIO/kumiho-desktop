@@ -370,17 +370,16 @@
     if(CE_STARTING) return;
     const button=$('ce-btn'), idleLabel=button.textContent;
     CE_STARTING=true; $('ce-btn').disabled=true; button.textContent='Starting Community Edition…';
-    let completed=false, configPending=false, serverStartAttempted=false;
+    let completed=false, configPending=false, cleanupBlocked=false;
     setLog('ce-log','');
     try{
       const pendingConfig=await invoke('ce_configure_pending');
       const st=await invoke('ce_status');
       const ready=st.reachable && await ceReady();
       if(ready){ await invoke('ce_configure_commit'); completed=true; await adoptCE(); return; }
-      if(st.reachable) await stopCeAndWait();
       if(pendingConfig){
-        await invoke('ce_configure_rollback');
-      }
+        await KumihoDesktopCeSetup.rollbackPendingCeSetup({invoke,stopCeAndWait});
+      }else if(st.reachable) await stopCeAndWait();
       if(!$('f-eula').checked){ setLog('ce-log','Please accept the EULA to continue.',true); return; }
       const pass=$('f-pass').value.trim(), passError=KumihoDesktopCeSetup.neo4jPasswordError(pass);
       if(passError){ validateNeo4jPassword(); setLog('ce-log',passError,true); return; }
@@ -396,26 +395,18 @@
       await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true });
       configPending=true;
       markStep('config','done'); markStep('start','active'); setLog('ce-log','Starting the server, waiting for it to answer on 9190…');
-      await invoke('ce_start');
-      serverStartAttempted=true;
-      const up=await waitFor(ceReady, 40000);
-      if(!up){
-        const reusedNeo4j=/^Neo4j (?:already serving|container .* started)/.test(databaseResult);
-        let tail=''; try{ tail=await invoke('ce_log_tail'); }catch(e){}
-        let msg=/unauthorized|authentication|invalid credentials|wrong password/i.test(tail)||reusedNeo4j
-          ? 'The server could not connect to Neo4j. The password from this setup may not match the existing database; use its original password or reset only a fresh, disposable setup.'
-          : 'Server did not become ready within 40s — check Docker/Neo4j, then use Start again.';
-        if(tail) msg += '\n— kumiho_server log (~/.kumiho/logs/kumiho_server.log) —\n'+tail;
-        setLog('ce-log',msg,true); return;
-      }
-      await invoke('ce_configure_commit'); configPending=false;
+      const outcome=await KumihoDesktopCeSetup.completeCeSetupStart({
+        invoke, databaseResult, stopCeAndWait,
+        waitForReady:()=>waitFor(ceReady,40000),
+      });
+      configPending=outcome.configPending; cleanupBlocked=outcome.cleanupBlocked;
+      if(!outcome.ok){ setLog('ce-log',outcome.message,true); return; }
       markStep('start','done'); completed=true; await adoptCE();
     }catch(e){ setLog('ce-log',String(e),true); }
     finally{
-      if(configPending){
-        let safeToRollback=!serverStartAttempted;
-        if(serverStartAttempted){ try{await stopCeAndWait(); safeToRollback=true;}catch(e){setLog('ce-log','Setup failed, but Community Edition could not be stopped. The pending config was preserved: '+String(e),true);} }
-        if(safeToRollback){ try{await invoke('ce_configure_rollback');}catch(e){setLog('ce-log','Setup failed and the previous config could not be restored: '+String(e),true);} }
+      if(configPending&&!cleanupBlocked){
+        try{await invoke('ce_configure_rollback'); configPending=false;}
+        catch(e){setLog('ce-log','Setup failed and the previous config could not be restored: '+String(e),true);}
       }
       CE_STARTING=false; if(!completed){ button.disabled=false; button.textContent=idleLabel; }
     }
@@ -700,9 +691,9 @@
     const up=await waitFor(ceReady,40000);
     return {up,result};
   }
-  async function stopCeAndWait(){
+  async function stopCeAndWait(force=false){
     const current=await invoke('ce_status');
-    if(!current.reachable) return false;
+    if(!current.reachable&&!force) return false;
     await invoke('ce_stop');
     const down=await waitFor(()=>invoke('ce_status').then(s=>!s.reachable),10000);
     if(!down) throw new Error('Community Edition did not stop within 10 seconds. It was not restarted.');

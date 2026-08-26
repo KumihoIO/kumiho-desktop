@@ -13,7 +13,10 @@
   mismatch and keeps the database intact.
 - A candidate CE configuration is committed only after both the server and Neo4j
   report healthy. Failed starts stop the candidate server and restore the prior
-  configuration, so retrying cannot overwrite a known-working password.
+  configuration, so retrying cannot overwrite a known-working password. Desktop
+  tracks an unbound startup process as well as the listening port before rollback.
+- Password-bearing candidate, backup, and final configuration files remain
+  owner-readable only (`0600`) on macOS and Linux.
 - Start, stop, restart, update, and automatic startup share one action lock.
   Runtime controls now stay disabled while an action is running, and Start is
   disabled whenever Community Edition is already serving.

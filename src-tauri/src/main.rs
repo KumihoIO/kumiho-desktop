@@ -21,9 +21,14 @@ mod window;
 
 use std::sync::Mutex;
 
-/// App-wide state: the Brain dashboard child we started (so we can stop it).
+/// App-wide state for child processes started by Desktop.
 #[derive(Default)]
 pub struct AppState {
+    /// The CE server child, retained so failed startup can prove it exited
+    /// before restoring a previous password-bearing config.
+    pub ce: Mutex<Option<std::process::Child>>,
+    /// Held across CE's check-then-spawn sequence to prevent duplicate starts.
+    pub ce_start: Mutex<()>,
     pub brain: Mutex<Option<std::process::Child>>,
     pub miho: Mutex<Option<std::process::Child>>,
     /// Held across 9miho's check-then-spawn so two UI paths cannot both decide

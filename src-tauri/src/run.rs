@@ -133,13 +133,49 @@ fn remove_if_present(path: &Path) -> Result<(), String> {
     }
 }
 
+fn restrict_private_file(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| e.to_string())?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+
+    file.write_all(contents).map_err(|e| e.to_string())?;
+    restrict_private_file(path)
+}
+
+fn copy_private_file(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::copy(from, to).map_err(|e| e.to_string())?;
+    restrict_private_file(to)
+}
+
 fn rollback_setup_config_at(home: &Path) -> Result<bool, String> {
     let config = home.join(CE_CONFIG_FILE);
     let backup = home.join(CE_CONFIG_BACKUP_FILE);
     let marker = home.join(CE_CONFIG_NEW_MARKER);
     let candidate = home.join(CE_CONFIG_CANDIDATE_FILE);
     let restored = if backup.exists() {
-        std::fs::copy(&backup, &config).map_err(|e| e.to_string())?;
+        copy_private_file(&backup, &config)?;
         true
     } else if marker.exists() {
         remove_if_present(&config)?;
@@ -159,11 +195,9 @@ fn stage_setup_config_at(home: &Path, contents: &str) -> Result<(), String> {
     let backup = home.join(CE_CONFIG_BACKUP_FILE);
     let marker = home.join(CE_CONFIG_NEW_MARKER);
     let candidate = home.join(CE_CONFIG_CANDIDATE_FILE);
-    std::fs::write(&candidate, contents).map_err(|e| e.to_string())?;
+    write_private_file(&candidate, contents.as_bytes())?;
     let preserve_result = if config.exists() {
-        std::fs::copy(&config, &backup)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        copy_private_file(&config, &backup)
     } else {
         std::fs::write(&marker, []).map_err(|e| e.to_string())
     };
@@ -171,9 +205,9 @@ fn stage_setup_config_at(home: &Path, contents: &str) -> Result<(), String> {
         let _ = remove_if_present(&candidate);
         return Err(error);
     }
-    if let Err(error) = std::fs::copy(&candidate, &config) {
+    if let Err(error) = copy_private_file(&candidate, &config) {
         let _ = rollback_setup_config_at(home);
-        return Err(error.to_string());
+        return Err(error);
     }
     remove_if_present(&candidate)
 }
@@ -311,11 +345,23 @@ pub fn ce_log_tail() -> String {
 /// be up first (see the docker pillar). Async: the startup watch below blocks
 /// for up to ten seconds, which must not park the main thread.
 #[tauri::command]
-pub async fn ce_start() -> Result<String, String> {
+pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
+    let _start_guard = state.ce_start.lock().map_err(|e| e.to_string())?;
     // Mirror brain_start's guard: a second spawn would lose the bind race AND
     // truncate the log the running server is still writing.
     if port_open(CE_PORT) {
         return Ok(format!("kumiho_server already serving on {CE_PORT}"));
+    }
+    {
+        let mut tracked = state.ce.lock().map_err(|e| e.to_string())?;
+        if let Some(child) = tracked.as_mut() {
+            match child.try_wait().map_err(|e| e.to_string())? {
+                None => return Ok(format!("kumiho_server already starting on {CE_PORT}")),
+                Some(_) => {
+                    tracked.take();
+                }
+            }
+        }
     }
     let bin = ce_binary().ok_or("kumiho_server is not installed yet")?;
     let home = kumiho_home().ok_or("no home directory")?;
@@ -346,6 +392,12 @@ pub async fn ce_start() -> Result<String, String> {
     while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
         if port_open(CE_PORT) {
+            let mut tracked = state.ce.lock().map_err(|e| {
+                let _ = child.kill();
+                let _ = child.wait();
+                e.to_string()
+            })?;
+            *tracked = Some(child);
             return Ok(format!("kumiho_server serving on {CE_PORT}"));
         }
         if let Ok(Some(status)) = child.try_wait() {
@@ -357,11 +409,27 @@ pub async fn ce_start() -> Result<String, String> {
             return Err(msg);
         }
     }
+    let mut tracked = state.ce.lock().map_err(|e| {
+        let _ = child.kill();
+        let _ = child.wait();
+        e.to_string()
+    })?;
+    *tracked = Some(child);
     Ok(format!("kumiho_server starting on {CE_PORT}"))
 }
 
 #[tauri::command]
-pub fn ce_stop() -> Result<String, String> {
+pub fn ce_stop(state: State<'_, AppState>) -> Result<String, String> {
+    if let Some(mut child) = state.ce.lock().map_err(|e| e.to_string())?.take() {
+        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            child.kill().map_err(|e| e.to_string())?;
+            child.wait().map_err(|e| e.to_string())?;
+        }
+        return Ok("tracked kumiho_server stopped".into());
+    }
+    if !port_open(CE_PORT) {
+        return Ok("kumiho_server is not running".into());
+    }
     #[cfg(windows)]
     {
         let out = command("taskkill")
@@ -590,6 +658,36 @@ mod tests {
         assert!(config.exists());
         assert!(rollback_setup_config_at(&home).unwrap());
         assert!(!config.exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_config_and_backup_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = test_home("private-config");
+        let config = home.join(CE_CONFIG_FILE);
+        let backup = home.join(CE_CONFIG_BACKUP_FILE);
+        std::fs::write(&config, "db_pass = \"original\"\n").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+
+        stage_setup_config_at(&home, "db_pass = \"candidate\"\n").unwrap();
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        rollback_setup_config_at(&home).unwrap();
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 }
