@@ -25,26 +25,37 @@ jobs:
     outputs:
       release_id: ${{ steps.mk.outputs.result }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify release tag matches Desktop version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GITHUB_REF_TYPE"
+          RELEASE_TAG="$GITHUB_REF_NAME"
+          LOCAL_TAG_COMMIT="$(git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}" || true)"
+          TAG_VERSION="${RELEASE_TAG#desktop-v}"
+          CARGO_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' src-tauri/Cargo.toml | head -n1)
+          TAURI_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          export LOCAL_TAG_COMMIT TAG_VERSION CARGO_VERSION TAURI_VERSION
+          node scripts/verify-desktop-release.cjs
+
       - uses: actions/github-script@v7
         id: mk
         env:
           TAG: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
         with:
           script: |
             const { owner, repo } = context.repo
             const tag = process.env.TAG
-            // Re-runs must reuse the release, not add another one.
-            const all = await github.paginate(github.rest.repos.listReleases, { owner, repo })
-            const found = all.find(r => r.tag_name === tag)
-            if (found) return found.id
-            const { data } = await github.rest.repos.createRelease({
-              owner, repo,
-              tag_name: tag,
-              name: `Kumiho Desktop ${tag}`,
-              draft: true,
-              prerelease: false,
+            const gate = require(`${process.env.GITHUB_WORKSPACE}/scripts/verify-desktop-release.cjs`)
+            const initialRef = await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` })
+            return await gate.ensureDraftRelease({
+              github, owner, repo, tag,
+              expectedSha: process.env.EXPECTED_SHA,
+              initialRef,
             })
-            return data.id
 
   release:
     needs: create-release
@@ -86,6 +97,8 @@ jobs:
         shell: bash
         run: |
           node scripts/test-active-server-health.cjs
+          node scripts/test-ce-setup.cjs
+          node scripts/test-desktop-release-gate.cjs
           node scripts/test-html5-file-drop.cjs
           node scripts/test-9miho-update.cjs
 

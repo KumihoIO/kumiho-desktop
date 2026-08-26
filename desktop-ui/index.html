@@ -139,7 +139,7 @@
         <label class="field"><span class="lab">Server port</span><input id="f-server" class="mono" value="9190"></label>
         <label class="field"><span class="lab">Your name (memory author)</span><input id="f-user" placeholder="isake"></label>
         <label class="field"><span class="lab">Neo4j port</span><input id="f-neo" class="mono" value="7687"></label>
-        <label class="field"><span class="lab">Neo4j password</span><input id="f-pass" type="password" placeholder="choose a local password"></label>
+        <label class="field"><span class="lab">Neo4j password</span><input id="f-pass" type="password" minlength="8" oninput="validateNeo4jPassword()" autocomplete="new-password" aria-describedby="f-pass-help" aria-invalid="false" placeholder="at least 8 characters"><span id="f-pass-help" class="faint" aria-live="polite" style="display:block;font-size:11.5px;margin-top:5px">At least 8 characters.</span></label>
         <label class="field"><span class="lab">Redis port (optional — event stream)</span><input id="f-redis" class="mono" value="6379"></label>
         <label class="field" style="display:flex;align-items:flex-end;gap:8px"><input id="f-usered" type="checkbox" checked style="width:auto;height:auto"><span class="lab" style="margin:0">Run Redis</span></label>
       </div>
@@ -158,7 +158,7 @@
         <div class="step" data-s="start"><span class="n">4</span> Start the server</div>
       </div>
       <div class="row" style="margin-top:16px"><button id="ce-btn" class="primary grow" onclick="setupCE()">Install &amp; start Community Edition</button></div>
-      <div class="log" id="ce-log"></div>
+      <div class="log" id="ce-log" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
     <div id="cloud-form" style="display:none">
       <p class="dim" style="font-size:13px;margin-top:16px">Sign in on the web to create a token, then paste a <b>service token</b> (1-year) here — stored in your OS keychain, never in a file.</p>
@@ -232,20 +232,20 @@
               <label class="field"><span class="lab">Redis port</span><input id="s-redis" class="mono" type="number" min="1" max="65535" oninput="markSettingsDirty()"></label>
             </div>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:12px"><input type="checkbox" id="s-use-redis" onchange="markSettingsDirty()"><span>Use Redis event stream</span></label>
-            <div class="row"><button class="primary" onclick="ceRestart()">Restart server</button><button onclick="cmd('ce_start','general')">Start</button><button onclick="cmd('ce_stop','general')">Stop</button></div>
+            <div class="row"><button id="ce-restart-btn" class="primary" onclick="ceRestart()" disabled>Restart server</button><button id="ce-start-btn" onclick="ceStart()" disabled>Start</button><button id="ce-stop-btn" onclick="ceStop()" disabled>Stop</button></div>
             <div class="row" id="ce-update" style="font-size:12.5px"></div>
           </div>
           <div class="card">
             <div class="row"><div class="grow"><span class="b">Databases</span> <span class="faint">Docker</span></div><span class="pill" id="docker-pill">…</span></div>
             <div class="row" style="font-size:13px" id="db-lines"></div>
-            <div class="row"><button onclick="dbUp()">Start databases</button><button onclick="cmd('docker_down','general')">Stop databases</button></div>
+            <div class="row"><button id="db-start-btn" onclick="dbUp()">Start databases</button><button id="db-stop-btn" onclick="dbDown()">Stop databases</button></div>
           </div>
           <div class="card">
             <div class="row"><div class="grow"><span class="b">Startup</span> <span class="faint">run Kumiho hands-free</span></div></div>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:8px"><input type="checkbox" id="cb-login" onchange="markSettingsDirty()"><span>Launch Kumiho Desktop when I sign in</span></label>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:6px"><input type="checkbox" id="cb-infra" onchange="markSettingsDirty()"><span>Start the CE server and databases automatically</span></label>
           </div>
-          <div class="log" id="log-general"></div>
+          <div class="log" id="log-general" role="status" aria-live="polite" aria-atomic="true"></div>
         </div>
 
         <div class="mode-panel" id="mode-cloud">
@@ -309,6 +309,7 @@
 <div class="toast" id="toast"></div>
 
 <script src="./server-health.js"></script>
+<script src="./ce-setup.js"></script>
 <script>
   const T = window.__TAURI__;
   const invoke = (c,a) => T.core.invoke(c,a);
@@ -334,11 +335,24 @@
       setTimeout(()=>{ btn.textContent=o; btn.classList.remove('primary'); },1600); }catch(e){ btn.textContent='select & copy'; } }
 
   // ---------- first-run setup ----------
+  // One lock covers setup, server/database actions, update, and autoboot.
+  let CE_STARTING=false;
+  let CE_ACTION='';
+  let CE_LAST_REACHABLE=false;
+  let CE_LAST_MANAGED=false;
+  let CE_LAST_STOPPABLE=true;
+  function validateNeo4jPassword(){ const input=$('f-pass'), help=$('f-pass-help'), error=KumihoDesktopCeSetup.neo4jPasswordError(input.value);
+    input.setCustomValidity(error); input.setAttribute('aria-invalid',error?'true':'false'); help.textContent=error||'At least 8 characters.'; help.style.color=error?'var(--bad)':''; return !error; }
   async function pick(m){ $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
     $('ce-form').style.display = m==='ce'?'block':'none'; $('cloud-form').style.display = m==='cloud'?'block':'none';
     if(m==='ce'){ const btn=$('ce-btn');
-      try{ const st=await invoke('ce_status');
-        if(st.reachable){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
+      if(btn) btn.disabled=CE_STARTING;
+      try{ const st=await invoke('ce_status'), ready=st.reachable && await ceReady();
+        if(ready){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
+        else if(st.reachable&&st.stoppable===false){ setLog('ce-log','Community Edition is running outside this Desktop session, but Neo4j is not ready. Recovery will show safe manual stop steps; Desktop will not signal that process.',true); if(btn) btn.textContent='Show manual recovery steps'; }
+        else if(st.reachable){ setLog('ce-log','Community Edition is running, but Neo4j is not ready. Repair will stop this Desktop session’s server and retry setup.',true); if(btn) btn.textContent='Repair & restart Community Edition'; }
+        else if(st.managed&&st.stoppable===false){ setLog('ce-log','A previous Community Edition start needs recovery. Continue to inspect it and show manual stop steps if it is still running; the pending config will be preserved.'); if(btn) btn.textContent='Recover / manual stop steps'; }
+        else if(st.managed){ setLog('ce-log','A Community Edition start from this Desktop session is still pending. Retry will stop it before changing the config.'); if(btn) btn.textContent='Recover Community Edition'; }
         else if(btn){ btn.textContent = st.installed ? 'Start Community Edition' : 'Install & start Community Edition'; }
       }catch(e){}
       // Docker heads-up + copy-paste install chips — only when a DB isn't already up and Docker is missing
@@ -359,40 +373,50 @@
     MODE='ce'; setLog('ce-log','✓ Community Edition ready. Opening…'); setTimeout(enterApp,700);
   }
   async function setupCE(){
+    if(CE_STARTING) return;
+    const button=$('ce-btn'), idleLabel=button.textContent;
+    CE_STARTING=true; $('ce-btn').disabled=true; button.textContent='Starting Community Edition…';
+    let completed=false, configPending=false, cleanupBlocked=false, failureMessage='';
     setLog('ce-log','');
-    let st; try{ st=await invoke('ce_status'); }catch(e){ setLog('ce-log',String(e),true); return; }
-    if(st.reachable){ await adoptCE(); return; }
-    if(!$('f-eula').checked){ setLog('ce-log','Please accept the EULA to continue.',true); return; }
-    const pass=$('f-pass').value.trim(); if(!pass){ setLog('ce-log','Set a Neo4j password.',true); return; }
-    const serverPort=+$('f-server').value||9190, neo4jPort=+$('f-neo').value||7687, redisPort=+$('f-redis').value||6379;
-    const useRedis=$('f-usered').checked, localUser=$('f-user').value.trim()||'me';
-    $('ce-steps').style.display='block';
     try{
+      const pendingConfig=await invoke('ce_configure_pending');
+      const st=await invoke('ce_status');
+      const ready=st.reachable && await ceReady();
+      if(ready){ await invoke('ce_configure_commit'); completed=true; await adoptCE(); return; }
+      if(pendingConfig){
+        await KumihoDesktopCeSetup.rollbackPendingCeSetup({invoke,stopCeAndWait});
+      }else if(st.reachable||st.managed) await stopCeAndWait();
+      if(!$('f-eula').checked){ setLog('ce-log','Please accept the EULA to continue.',true); return; }
+      const pass=$('f-pass').value.trim(), passError=KumihoDesktopCeSetup.neo4jPasswordError(pass);
+      if(passError){ validateNeo4jPassword(); setLog('ce-log',passError,true); return; }
+      const serverPort=+$('f-server').value||9190, neo4jPort=+$('f-neo').value||7687, redisPort=+$('f-redis').value||6379;
+      const useRedis=$('f-usered').checked, localUser=$('f-user').value.trim()||'me';
+      $('ce-steps').style.display='block';
       markStep('install','active');
       if(!st.installed){ setLog('ce-log','Installing CE server…'); await invoke('ce_install'); }
       markStep('install','done'); markStep('db','active'); setLog('ce-log','Starting Neo4j + Redis in Docker (first run may pull images)…');
-      await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis });
+      const databaseResult=await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis, timeoutMs:900000 });
       markStep('db','done'); markStep('config','active');
-      // Always rewrite the config: the wizard's password must win. Skipping this
-      // when server.toml already existed let a retyped password drift from the
-      // container's, and the server then died on Neo4j auth with no visible cause.
       setLog('ce-log','Writing config…');
       await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true });
+      configPending=true;
       markStep('config','done'); markStep('start','active'); setLog('ce-log','Starting the server, waiting for it to answer on 9190…');
-      await invoke('ce_start');
-      const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable), 40000);
-      if(!up){
-        let tail=''; try{ tail=await invoke('ce_log_tail'); }catch(e){}
-        // Positive auth signals only — a loose match (e.g. bare "auth") fires on
-        // ordinary startup lines and would misdiagnose unrelated failures.
-        let msg = /unauthorized|authentication|invalid credentials|wrong password/i.test(tail)
-          ? 'The server could not log in to Neo4j — the password from this setup does not match the one the database container was created with. Re-run setup with the container\'s original password (a container keeps its first password; typing a new one here cannot change it).'
-          : 'Server did not answer on 9190 within 40s — check Docker/Neo4j, then use Start again.';
-        if(tail) msg += '\n— kumiho_server log (~/.kumiho/logs/kumiho_server.log) —\n'+tail;
-        setLog('ce-log',msg,true); return;
-      }
-      markStep('start','done'); await adoptCE();
+      const outcome=await KumihoDesktopCeSetup.completeCeSetupStart({
+        invoke, databaseResult, stopCeAndWait,
+        waitForReady:()=>waitFor(ceReady,40000),
+      });
+      configPending=outcome.configPending; cleanupBlocked=outcome.cleanupBlocked;
+      if(!outcome.ok){ failureMessage=outcome.message; setLog('ce-log',failureMessage,true); return; }
+      markStep('start','done'); completed=true; await adoptCE();
     }catch(e){ setLog('ce-log',String(e),true); }
+    finally{
+      if(configPending&&!cleanupBlocked){
+        try{await invoke('ce_configure_rollback'); configPending=false;
+          if(failureMessage) setLog('ce-log',failureMessage+'\nPrevious config was restored during cleanup.',true);}
+        catch(e){setLog('ce-log',(failureMessage?failureMessage+'\n':'')+'Setup failed and the previous config could not be restored: '+String(e),true);}
+      }
+      CE_STARTING=false; if(!completed){ button.disabled=false; button.textContent=idleLabel; }
+    }
   }
   async function setupCloud(){
     const token=$('c-token').value.trim(); if(!token){ setLog('cloud-log','Paste a service token, or get one on the web.',true); return; }
@@ -552,7 +576,7 @@
         if(!cloudReachable) reason=probe.status===401||probe.status===403?'rejected-token':'unreachable';
       }
     }else{
-      ceReachable=!!(await invoke('ce_status')).reachable;
+      ceReachable=await ceReady();
       if(!ceReachable) reason='stopped';
     }
     const reachable=KumihoDesktopStatus.activeServerReachable(mode,ceReachable,cloudReachable);
@@ -610,6 +634,9 @@
           : ((m.update_available||MIHO_UPDATE?.update_available)?'A newer 9miho release is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the runtime; no GitHub login or source toolchain is required.'));
       }
     }catch(e){}
+    if(refreshIsCurrent() && $('settings').classList.contains('show') && $('s-general').classList.contains('active') && $('settings-mode').value==='ce'){
+      try{ const ce=await invoke('ce_status'); if(refreshIsCurrent()) renderCeRuntimeStatus(ce); }catch(e){}
+    }
     if(refreshIsCurrent() && $('s-apps').classList.contains('active')) await refreshApps(mihoStatus,refreshGeneration);
     })();
     STATUS_REFRESH_IN_FLIGHT=refreshPromise;
@@ -624,38 +651,101 @@
   const CE_LATEST_URL='https://api.github.com/repos/KumihoIO/kumiho-server-community/releases/latest';
   async function ceLatestVersion(){ try{ const r=await fetch(CE_LATEST_URL); if(!r.ok) return null;
     const j=await r.json(); return String(j.tag_name||'').replace(/^v/,'')||null; }catch(e){ return null; } }
-  async function ceUpdate(){ setLog('general','updating the CE server…');
-    try{ await invoke('ce_stop'); }catch(e){}
-    try{ await invoke('ce_install'); await invoke('ce_start');
-      const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable), 40000);
-      setLog('general', up?'✓ CE updated and running':'installed — but the server did not answer; try Start'); }
-    catch(e){ setLog('general',String(e),true); }
-    refreshRun(); }
+  async function ceUpdate(){ if(!beginCeAction('update'))return; setLog('general','updating the CE server…');
+    try{ await stopCeAndWait(); await invoke('ce_install'); const {up}=await startCeAndWait();
+      if(up){ setLog('general','✓ CE updated and running'); toast('Community Edition updated'); }
+      else setLog('general','CE was installed, but the server did not answer; try Start.',true); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(); } }
 
-  async function refreshRun(){
-    try{ const ce=await invoke('ce_status'); pill($('ce-pill'),ce.reachable, ce.reachable?('v'+(ce.version||'?')):(ce.installed?'stopped':'not installed'));
-      $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
+  async function refreshRun(){ return refreshRunWithOptions(true); }
+  async function refreshRunLocal(){ return refreshRunWithOptions(false); }
+  async function refreshRunWithOptions(checkLatest){
+    try{ const ce=await invoke('ce_status'); renderCeRuntimeStatus(ce);
       const box=$('ce-update');
-      if(box){ const latest=await ceLatestVersion();
+      if(box && checkLatest){ const latest=await ceLatestVersion();
         if(!latest) box.innerHTML='';
-        else if(ce.version && ce.version!==latest) box.innerHTML=`<span class="pill accent">update available · v${latest}</span> <button class="sm primary" onclick="ceUpdate()">Update CE</button>`;
+        else if(ce.version && ce.version!==latest) box.innerHTML=`<span class="pill accent">update available · v${latest}</span> <button id="ce-update-btn" class="sm primary" onclick="ceUpdate()">Update CE</button>`;
         else box.innerHTML=`<span class="faint">CE is up to date (v${latest})</span>`; }
+      updateCeControlButtons(ce.reachable);
     }catch(e){}
     try{ const d=await invoke('docker_status'); $('docker-pill').textContent=d.available?'docker ok':'no docker'; $('docker-pill').className='pill '+(d.available?'on':'off');
       $('db-lines').innerHTML=`<span class="pill ${d.neo4j?'on':'off'}">Neo4j</span> <span class="pill ${d.redis?'on':'off'}">Redis</span>`; }catch(e){}
     refreshStartup();
   }
   async function refreshStartup(){ /* General loads startup values into its draft in reloadSettingsDraft(). */ }
-  async function ceRestart(){ setLog('general','restarting…'); try{await invoke('ce_stop');}catch(e){} setTimeout(()=>cmd('ce_start','general'),900); }
-  async function dbUp(){ const c=await invoke('desktop_config_get'); setLog('general','starting databases…');
-    const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis});
-    try{ const r=await go(''); setLog('general', r||'✓ databases up'); }
-    catch(e){ const msg=String(e);
-      if(/password/i.test(msg)){ const pass=prompt('Neo4j password (needed to create the database):');
-        if(!pass){ setLog('general','cancelled'); refreshRun(); return; }
-        try{ const r=await go(pass); setLog('general', r||'✓ databases up'); }catch(e2){ setLog('general',String(e2),true); } }
-      else { setLog('general',msg,true); } }
-    refreshRun(); }
+  function renderCeRuntimeStatus(ce){
+    const manualRecovery=ce.stoppable===false && (ce.reachable||ce.managed);
+    pill($('ce-pill'),ce.reachable,ce.reachable?('v'+(ce.version||'?')+(manualRecovery?' · manual stop required':'')):(ce.managed?(manualRecovery?'manual stop / recovery required':'starting / recovery needed'):(ce.installed?'stopped':'not installed')));
+    $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
+    updateCeControlButtons(ce.reachable,ce.managed,ce.stoppable);
+  }
+  function updateCeControlButtons(reachable=CE_LAST_REACHABLE,managed=CE_LAST_MANAGED,stoppable=CE_LAST_STOPPABLE){
+    CE_LAST_REACHABLE=!!reachable;
+    CE_LAST_MANAGED=!!managed;
+    CE_LAST_STOPPABLE=stoppable!==false;
+    const manualRecovery=!CE_LAST_STOPPABLE&&(CE_LAST_REACHABLE||CE_LAST_MANAGED);
+    const state=KumihoDesktopCeSetup.ceControlState(CE_LAST_REACHABLE,CE_STARTING,CE_LAST_MANAGED,CE_LAST_STOPPABLE);
+    const start=$('ce-start-btn'), restart=$('ce-restart-btn'), stop=$('ce-stop-btn'), update=$('ce-update-btn'), dbStart=$('db-start-btn'), dbStop=$('db-stop-btn');
+    if(start){ start.disabled=state.startDisabled; start.textContent=CE_ACTION==='start'?'Starting…':'Start'; start.setAttribute('aria-busy',String(CE_ACTION==='start')); }
+    if(restart){ restart.disabled=state.restartDisabled; restart.textContent=CE_ACTION==='restart'?'Restarting…':'Restart server'; restart.title=manualRecovery?'Stop the server manually before restarting.':''; restart.setAttribute('aria-busy',String(CE_ACTION==='restart')); }
+    if(stop){ stop.disabled=state.stopDisabled; stop.textContent=CE_ACTION==='stop'?(manualRecovery?'Checking…':'Stopping…'):(manualRecovery?'Manual stop / recovery steps':'Stop'); stop.title=manualRecovery?'Inspect the recorded process and show safe manual recovery steps.':''; stop.setAttribute('aria-busy',String(CE_ACTION==='stop')); }
+    if(update){ update.disabled=CE_STARTING||manualRecovery; update.textContent=CE_ACTION==='update'?'Updating…':'Update CE'; update.title=manualRecovery?'Stop the server manually before updating.':''; update.setAttribute('aria-busy',String(CE_ACTION==='update')); }
+    if(dbStart){ dbStart.disabled=CE_STARTING; dbStart.textContent=CE_ACTION==='db-start'?'Starting…':'Start databases'; dbStart.setAttribute('aria-busy',String(CE_ACTION==='db-start')); }
+    if(dbStop){ dbStop.disabled=CE_STARTING; dbStop.textContent=CE_ACTION==='db-stop'?'Stopping…':'Stop databases'; dbStop.setAttribute('aria-busy',String(CE_ACTION==='db-stop')); }
+  }
+  function beginCeAction(action){ if(CE_STARTING)return false; CE_STARTING=true; CE_ACTION=action; updateCeControlButtons(); return true; }
+  async function finishCeAction(checkLatest=true){ CE_STARTING=false; CE_ACTION=''; await (checkLatest?refreshRun():refreshRunLocal()); refreshStatus(); }
+  async function ceReady(){ try{ return KumihoDesktopCeSetup.ceHealthReady(await invoke('ce_health')); }catch(e){ return false; } }
+  async function startCeAndWait(){
+    const current=await invoke('ce_status');
+    if(current.reachable){ const up=await ceReady(); return {up,result:up?'Community Edition is already running':'Community Edition is running, but Neo4j is not ready'}; }
+    return KumihoDesktopCeSetup.startCeRuntime({
+      invoke, stopCeAndWait, waitForReady:()=>waitFor(ceReady,40000),
+    });
+  }
+  async function stopCeAndWait(force=false){
+    const current=await invoke('ce_status');
+    if(!current.reachable&&!current.managed&&!force) return false;
+    await invoke('ce_stop',{force});
+    const down=await waitFor(()=>invoke('ce_status').then(s=>!s.reachable),10000);
+    if(!down) throw new Error('Community Edition did not stop within 10 seconds. It was not restarted.');
+    return true;
+  }
+  async function ceStart(){ if(!beginCeAction('start'))return; setLog('general','starting Community Edition…');
+    try{ const {up,result}=await startCeAndWait();
+      if(up){ setLog('general',result||'✓ Community Edition started'); toast('Community Edition started'); }
+      else setLog('general','Server did not answer within 40s — check Neo4j and try again.',true); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(); } }
+  async function ceStop(){ if(!beginCeAction('stop'))return; setLog('general','stopping Community Edition…');
+    try{ const stopped=await stopCeAndWait(); setLog('general',stopped?'✓ Community Edition stopped':'Community Edition is already stopped'); toast('Community Edition stopped'); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(); } }
+  async function ceRestart(){ if(!beginCeAction('restart'))return; setLog('general','restarting Community Edition…');
+    try{ await stopCeAndWait(); const {up,result}=await startCeAndWait();
+      if(up){ setLog('general',result||'✓ Community Edition restarted'); toast('Community Edition restarted'); }
+      else setLog('general','Server did not answer within 40s — check Neo4j and try again.',true); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(); } }
+  async function dbUp(){ if(!beginCeAction('db-start'))return; setLog('general','starting databases…');
+    try{ const c=await invoke('desktop_config_get');
+      const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis,timeoutMs:300000});
+      try{ const r=await go(''); setLog('general',r||'✓ databases up'); }
+      catch(e){ const msg=String(e);
+        if(!/password/i.test(msg)) throw e;
+        const pass=prompt('Neo4j password (needed to create the database):');
+        if(!pass){ setLog('general','cancelled'); return; }
+        const r=await go(pass); setLog('general',r||'✓ databases up'); }
+    }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(false); } }
+  async function dbDown(){ if(!beginCeAction('db-stop'))return; setLog('general','stopping databases…');
+    try{ const r=await invoke('docker_down'); const status=await invoke('docker_status');
+      const remaining=[status.neo4j&&'Neo4j',status.redis&&'Redis'].filter(Boolean);
+      if(remaining.length) throw new Error((r?r+'. ':'')+remaining.join(' and ')+' still appears to be running. No database data was removed; check Docker Desktop and retry.');
+      setLog('general',r||'✓ databases stopped'); toast(r||'Databases stopped');
+    }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(false); } }
 
   // The control plane sends no Access-Control-Allow-Origin for the app origin, so
   // a webview fetch is CORS-blocked and would falsely read as unreachable. Probe
@@ -866,10 +956,6 @@
     return up;
   }
 
-  // Bound a promise so a hung CLI (e.g. `docker start` against a daemon still
-  // warming up at login) can't stall startup forever.
-  const withTimeout=(p,ms)=>Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('timed out')),ms))]);
-
   // On launch, optionally bring the local CE infra up (server + Docker DBs) before
   // Memory, so a hands-free start lands on a live graph, not an empty one. Only
   // in CE mode, only when the toggle is on, and only if CE isn't already reachable.
@@ -882,16 +968,25 @@
         let cfg={}; try{ cfg=await invoke('desktop_config_get'); }catch(e){}
         if(cfg.autostart_infra){
           let ce={reachable:false}; try{ ce=await invoke('ce_status'); }catch(e){}
-          if(!ce.reachable){
+          const ready=ce.reachable && await ceReady();
+          if(!ready && beginCeAction('boot')){
             toast('Starting Community Edition…');
-            // Best-effort and time-bounded. Empty password reuses the containers
-            // made during setup; if the Docker daemon is still coming up at login,
-            // these may fail — we don't block the app, we just poll for CE and, if
-            // it never answers, point the user at Settings → General.
-            try{ await withTimeout(invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis}), 25000); }catch(e){}
-            try{ await withTimeout(invoke('ce_start'), 15000); }catch(e){}
-            const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable).catch(()=>false), 45000);
-            if(!up) toast('Community Edition is still starting — open Settings → General if it doesn’t appear.', true);
+            // Empty password reuses the containers made during setup. Keep the
+            // native Docker operation and CE start serialized: Tauri invokes are
+            // not cancelled when a JavaScript timeout wins a Promise.race.
+            try{
+              if(ce.reachable) await stopCeAndWait();
+              const {up}=await KumihoDesktopCeSetup.startCeAutoboot({
+                startDatabases:async()=>{
+                  const slow=setTimeout(()=>toast('Docker setup is taking longer than expected. Community Edition will start after this step finishes.'),25000);
+                  try{ return await invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis,timeoutMs:30000}); }
+                  finally{ clearTimeout(slow); }
+                },
+                startServer:startCeAndWait,
+              });
+              if(!up) toast('Community Edition did not become ready — open Settings → General to inspect its current status and retry.', true);
+            } catch(e){ const message='Community Edition could not start automatically: '+String(e); setLog('general',message,true); toast(message,true); }
+            finally { await finishCeAction(false); }
           }
         }
       }
