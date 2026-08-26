@@ -10,6 +10,7 @@ mod account;
 mod config;
 mod connect;
 mod docker;
+mod embedding;
 mod memory;
 mod miho;
 mod run;
@@ -91,6 +92,15 @@ fn main() {
             account::account_set_token,
             account::account_clear_token,
             account::cloud_probe,
+            // Embedding — CE vector-search key in the OS keychain + backfill
+            embedding::embedding_key_status,
+            embedding::embedding_key_get,
+            embedding::embedding_key_set,
+            embedding::embedding_key_clear,
+            embedding::embedding_presets,
+            embedding::embedding_status,
+            embedding::embedding_backfill,
+            embedding::embedding_rebuild_index,
             // Connect — per-host plugin install
             connect::connect_hosts,
             connect::connect_check_updates,
