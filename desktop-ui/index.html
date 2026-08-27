@@ -149,7 +149,7 @@
         <div id="f-embed-fields" style="display:none;margin-top:12px">
           <label class="field" style="margin-bottom:10px"><span class="lab">Preset</span><select id="f-embed-preset" onchange="applyWizardPreset()"></select></label>
           <div class="grid2">
-            <label class="field"><span class="lab">Provider</span><select id="f-embed-provider" onchange="markWizardEmbeddingDirty()"><option value="openai">OpenAI</option><option value="openai">OpenAI-compatible (BGE-M3, TEI, vLLM)</option></select></label>
+            <label class="field"><span class="lab">Provider</span><select id="f-embed-provider" onchange="markWizardEmbeddingDirty()"><option value="openai">OpenAI-compatible (OpenAI, BGE-M3, TEI, vLLM)</option></select></label>
             <label class="field"><span class="lab">Model</span><input id="f-embed-model" placeholder="text-embedding-3-small" oninput="markWizardEmbeddingDirty()"></label>
             <label class="field"><span class="lab">API key</span><input id="f-embed-key" type="password" autocomplete="off" placeholder="sk-… or provider key" oninput="markWizardEmbeddingDirty()"></label>
             <label class="field"><span class="lab">Dimensions</span><input id="f-embed-dims" class="mono" type="number" min="64" max="4096" placeholder="1536" oninput="markWizardEmbeddingDirty()"></label>
@@ -268,7 +268,7 @@
             <div id="s-embed-fields" style="display:none;margin-top:12px">
               <label class="field" style="margin-bottom:10px"><span class="lab">Preset</span><select id="s-embed-preset" onchange="applySettingsPreset()"></select></label>
               <div class="grid2">
-                <label class="field"><span class="lab">Provider</span><select id="s-embed-provider" onchange="markSettingsDirty()"><option value="openai">OpenAI</option><option value="openai">OpenAI-compatible (BGE-M3, TEI, vLLM)</option></select></label>
+                <label class="field"><span class="lab">Provider</span><select id="s-embed-provider" onchange="markSettingsDirty()"><option value="openai">OpenAI-compatible (OpenAI, BGE-M3, TEI, vLLM)</option></select></label>
                 <label class="field"><span class="lab">Model</span><input id="s-embed-model" placeholder="text-embedding-3-small" oninput="markSettingsDirty()"></label>
                 <label class="field"><span class="lab">API key</span><input id="s-embed-key" type="password" autocomplete="off" placeholder="Leave blank to keep stored key" oninput="markSettingsDirty()"></label>
                 <label class="field"><span class="lab">Dimensions</span><input id="s-embed-dims" class="mono" type="number" min="64" max="4096" placeholder="1536" oninput="markSettingsDirty()"></label>
@@ -404,7 +404,6 @@
     const preset=KumihoDesktopEmbedding.PRESETS[idx];
     if(!preset) return;
     const fields={ provider:$('f-embed-provider'), model:$('f-embed-model'), dimensions:$('f-embed-dims'), endpoint:$('f-embed-endpoint'), sendDimensions:$('f-embed-send-dims'), batchSize:$('f-embed-batch') };
-    // Only overwrite model/dims/endpoint/send when user hasn't customized, unless silent (initial).
     KumihoDesktopEmbedding.applyPresetToFields(preset, fields);
     if(!silent) markWizardEmbeddingDirty();
   }
@@ -428,7 +427,6 @@
       batch_size: +$('f-embed-batch')?.value||20,
     };
   }
-  function onWizardProviderChange(){ markWizardEmbeddingDirty(); }
   async function pick(m){ $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
     $('ce-form').style.display = m==='ce'?'block':'none'; $('cloud-form').style.display = m==='cloud'?'block':'none';
     if(m==='ce'){ const btn=$('ce-btn');
@@ -455,9 +453,9 @@
     let cur={}; try{ cur=await invoke('desktop_config_get'); }catch(e){}
     const embed=collectWizardEmbedding();
     const embedErr=embed.enabled ? KumihoDesktopEmbedding.validateEmbeddingConfig(embed) : '';
-    if(embedErr){ setLog('ce-log',embedErr,true); CE_STARTING=false; return; }
+    if(embedErr){ setLog('ce-log',embedErr,true); return false; }
     if(embed.enabled && embed.api_key){
-      try{ await invoke('embedding_key_set',{apiKey:embed.api_key}); }catch(e){ setLog('ce-log','Could not save embedding key: '+String(e),true); return; }
+      try{ await invoke('embedding_key_set',{apiKey:embed.api_key}); }catch(e){ setLog('ce-log','Could not save embedding key: '+String(e),true); return false; }
     }
     const cfg={ ...cur, configured:true, mode:'ce', server_port:+$('f-server').value||9190, neo4j_port:+$('f-neo').value||7687,
       redis_port:+$('f-redis').value||6379, use_redis:$('f-usered').checked, local_user:$('f-user').value.trim()||'me',
@@ -466,6 +464,7 @@
       embedding_batch_size: embed.batch_size||20 };
     try{ await invoke('desktop_config_set',{cfg}); }catch(e){}
     MODE='ce'; setLog('ce-log','✓ Community Edition ready. Opening…'); setTimeout(enterApp,700);
+    return true;
   }
   async function setupCE(){
     if(CE_STARTING) return;
@@ -477,7 +476,7 @@
       const pendingConfig=await invoke('ce_configure_pending');
       const st=await invoke('ce_status');
       const ready=st.reachable && await ceReady();
-      if(ready){ await invoke('ce_configure_commit'); completed=true; await adoptCE(); return; }
+      if(ready){ await invoke('ce_configure_commit'); completed=await adoptCE(); return; }
       if(pendingConfig){
         await KumihoDesktopCeSetup.rollbackPendingCeSetup({invoke,stopCeAndWait});
       }else if(st.reachable||st.managed) await stopCeAndWait();
@@ -519,7 +518,7 @@
       });
       configPending=outcome.configPending; cleanupBlocked=outcome.cleanupBlocked;
       if(!outcome.ok){ failureMessage=outcome.message; setLog('ce-log',failureMessage,true); return; }
-      markStep('start','done'); completed=true; await adoptCE();
+      markStep('start','done'); completed=await adoptCE();
     }catch(e){ setLog('ce-log',String(e),true); }
     finally{
       if(configPending&&!cleanupBlocked){
@@ -635,7 +634,7 @@
         else txt.textContent='';
       }
       const backfillBtn=$('embed-backfill-btn'), rebuildBtn=$('embed-rebuild-btn');
-      const canBackfill = st.enabled && st.without_embedding>0;
+      const canBackfill = st.enabled && (st.without_embedding==null || st.without_embedding>0);
       if(backfillBtn) backfillBtn.disabled=!canBackfill;
       if(rebuildBtn) rebuildBtn.disabled=!st.embedding_enabled;
     }catch(e){}
@@ -647,7 +646,7 @@
       const r=await invoke('embedding_backfill',{batchSize: batch});
       setLog('general','✓ Backfill complete: '+r.embedded+' embedded / '+r.total+' total'+(r.errors?' ('+r.errors+' errors)':'')+'. '+(r.message||'')); toast('Backfill: '+r.embedded+'/'+r.total); refreshEmbeddingStatus();
     }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
-    finally{ if(btn) btn.disabled=false; refreshRunLocal(); }
+    finally{ if(btn) btn.disabled=false; refreshEmbeddingStatus(); }
   }
   async function rebuildVectorIndex(){
     if(!confirm('Rebuild the vector index? This is required when you change the embedding model or dimensions. Existing embeddings will be kept but may be re-indexed; run Backfill afterwards to re-embed.')) return;
@@ -687,22 +686,20 @@
     if(draft.mode==='ce' && (![draft.server_port,draft.neo4j_port,draft.redis_port].every(validPort))){ setLog(logId,'Ports must be whole numbers from 1 to 65535.',true); return; }
     if(draft.mode==='ce' && draft.embedding_enabled){
       const enteredKey=$('s-embed-key').value.trim();
-      let keyForValidation=enteredKey;
-      if(!keyForValidation){
-        try{ keyForValidation=await invoke('embedding_key_get')||''; }catch(e){ keyForValidation=''; }
+      let hasStoredKey=false;
+      if(!enteredKey){
+        hasStoredKey=await invoke('embedding_key_status').then(st=>st.has_key).catch(()=>false);
       }
-      const embedCfg={ enabled:true, provider:draft.embedding_provider, model:draft.embedding_model, dimensions:draft.embedding_dimensions, endpoint:draft.embedding_endpoint, send_dimensions:draft.embedding_send_dimensions, api_key:keyForValidation, batch_size:draft.embedding_batch_size };
+      const embedCfg={ enabled:true, provider:draft.embedding_provider, model:draft.embedding_model, dimensions:draft.embedding_dimensions, endpoint:draft.embedding_endpoint, send_dimensions:draft.embedding_send_dimensions, api_key:enteredKey||(hasStoredKey?'stored':''), batch_size:draft.embedding_batch_size };
       const err=KumihoDesktopEmbedding.validateEmbeddingConfig(embedCfg);
       if(err){ setLog('general',err,true); return; }
-      if(!keyForValidation){ setLog('general','Embedding API key is required when vector search is enabled.',true); return; }
     }
     APPLYING_SETTINGS=true; $('settings-save').disabled=true; $('settings-save').textContent='Saving…';
-    let previousConfig=null, previousLogin=false, previousToken=null, previousEmbedKey=null, persistenceStarted=false;
+    let previousConfig=null, previousLogin=false, previousToken=null, previousEmbedKey=null, embedKeyChanged=false, embedChanged=false, persistenceStarted=false;
     try{
       previousConfig=await invoke('desktop_config_get');
       previousLogin=await invoke('autostart_get');
       previousToken=await invoke('account_token');
-      try{ previousEmbedKey=await invoke('embedding_key_get'); }catch(e){ previousEmbedKey=null; }
       if(draft.mode==='cloud'){
         const enteredToken=$('a-token').value.trim();
         const token=enteredToken||await invoke('account_token');
@@ -718,7 +715,11 @@
       if(draft.mode==='ce'){
         const enteredEmbedKey=$('s-embed-key').value.trim();
         if(enteredEmbedKey){
+          // Capture the key we are replacing so rollback can put it back. Only
+          // this branch touches the vault, so only this branch may undo it.
+          previousEmbedKey=await invoke('embedding_key_get');
           await invoke('embedding_key_set',{apiKey:enteredEmbedKey});
+          embedKeyChanged=true;
         } else if(!draft.embedding_enabled){
           // keep key for later re-enable; do not clear
         } else {
@@ -726,7 +727,7 @@
           if(!hasKey) throw new Error('Embedding API key is required when vector search is enabled.');
         }
         // Detect embedding config change that requires CE restart.
-        var embedChanged = previousConfig && (
+        embedChanged = !!previousConfig && (
           previousConfig.embedding_enabled !== draft.embedding_enabled ||
           previousConfig.embedding_provider !== draft.embedding_provider ||
           previousConfig.embedding_model !== draft.embedding_model ||
@@ -740,7 +741,7 @@
       await invoke('autostart_set',{enabled:SETTINGS_LOGIN_DRAFT});
       MODE=draft.mode; invalidateServerHealth(); $('brand-sub').textContent=MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
       $('a-token').value=''; $('s-embed-key').value=''; setSettingsDirty(false); setLog(logId,'✓ Settings saved. Reconnecting applications…');
-      if(draft.mode==='ce' && typeof embedChanged!=='undefined' && embedChanged){
+      if(draft.mode==='ce' && embedChanged){
         try{
           const st=await invoke('ce_status');
           if(st.reachable || st.managed){
@@ -766,7 +767,7 @@
         try{ if(previousConfig)await invoke('desktop_config_set',{cfg:previousConfig}); }catch(rollback){ rollbackErrors.push('config: '+String(rollback)); }
         try{ await invoke('autostart_set',{enabled:previousLogin}); }catch(rollback){ rollbackErrors.push('startup: '+String(rollback)); }
         try{ if(previousToken)await invoke('account_set_token',{token:previousToken}); else await invoke('account_clear_token'); }catch(rollback){ rollbackErrors.push('token: '+String(rollback)); }
-        try{ if(previousEmbedKey) await invoke('embedding_key_set',{apiKey:previousEmbedKey}); else if(previousEmbedKey===null) await invoke('embedding_key_clear').catch(()=>{}); }catch(rollback){ rollbackErrors.push('embedding key: '+String(rollback)); }
+        try{ if(embedKeyChanged){ if(previousEmbedKey) await invoke('embedding_key_set',{apiKey:previousEmbedKey}); else await invoke('embedding_key_clear'); } }catch(rollback){ rollbackErrors.push('embedding key: '+String(rollback)); }
       }
       invalidateServerHealth();
       const message=String(e)+(rollbackErrors.length?' Rollback needs attention ('+rollbackErrors.join('; ')+').':'');

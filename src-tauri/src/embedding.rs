@@ -75,67 +75,6 @@ pub fn embedding_key_clear() -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helpers (shared between Rust and JS via Tauri)
-// ---------------------------------------------------------------------------
-
-/// Placeholder presets shown in the UI so users can pick quickly.
-#[derive(Serialize, Clone)]
-pub struct EmbeddingPreset {
-    pub label: String,
-    pub provider: String,
-    pub model: String,
-    pub dimensions: u32,
-    pub endpoint: String,
-    pub send_dimensions: Option<bool>,
-}
-
-#[tauri::command]
-pub fn embedding_presets() -> Vec<EmbeddingPreset> {
-    vec![
-        EmbeddingPreset {
-            label: "OpenAI — text-embedding-3-small (1536)".into(),
-            provider: "openai".into(),
-            model: "text-embedding-3-small".into(),
-            dimensions: 1536,
-            endpoint: "".into(),
-            send_dimensions: Some(true),
-        },
-        EmbeddingPreset {
-            label: "OpenAI — text-embedding-3-large (3072)".into(),
-            provider: "openai".into(),
-            model: "text-embedding-3-large".into(),
-            dimensions: 3072,
-            endpoint: "".into(),
-            send_dimensions: Some(true),
-        },
-        EmbeddingPreset {
-            label: "Cloudflare — bge-m3 (1024)".into(),
-            provider: "openai".into(),
-            model: "bge-m3".into(),
-            dimensions: 1024,
-            endpoint: "https://api.cloudflare.com/client/v4/accounts/<account_id>/ai/run/@cf/baai/bge-m3".into(),
-            send_dimensions: Some(false),
-        },
-        EmbeddingPreset {
-            label: "Self-hosted — BGE-M3 via TEI/vLLM (1024)".into(),
-            provider: "openai".into(),
-            model: "BAAI/bge-m3".into(),
-            dimensions: 1024,
-            endpoint: "http://localhost:8080/v1/embeddings".into(),
-            send_dimensions: Some(false),
-        },
-        EmbeddingPreset {
-            label: "Custom OpenAI-compatible".into(),
-            provider: "openai".into(),
-            model: "".into(),
-            dimensions: 1536,
-            endpoint: "".into(),
-            send_dimensions: None,
-        },
-    ]
-}
-
-// ---------------------------------------------------------------------------
 // Backfill / status — talks to the CE server's admin endpoints
 // ---------------------------------------------------------------------------
 
@@ -154,17 +93,14 @@ pub struct EmbeddingStatus {
     pub error: Option<String>,
 }
 
-fn ce_base_url() -> String {
-    // desktop.json server_port is authoritative; fall back to 9190.
-    let port: u16 = crate::util::kumiho_home()
-        .and_then(|h| std::fs::read_to_string(h.join("desktop.json")).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("server_port").and_then(|p| p.as_u64()).map(|p| p as u16))
-        .unwrap_or(9190);
+fn ce_base_url(cfg: &crate::config::DesktopConfig) -> String {
+    // desktop.json server_port is authoritative; fall back to 9190 when the
+    // file predates the field (serde default) or was never written.
+    let port = if cfg.server_port == 0 { 9190 } else { cfg.server_port };
     format!("http://127.0.0.1:{port}")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn embedding_status() -> EmbeddingStatus {
     let cfg = crate::config::desktop_config_get();
     let has_key = embedding_api_key().is_some();
@@ -177,7 +113,7 @@ pub fn embedding_status() -> EmbeddingStatus {
     let mut error = None;
 
     if enabled {
-        let url = format!("{}/api/_admin/embedding-status", ce_base_url());
+        let url = format!("{}/api/_admin/embedding-status", ce_base_url(&cfg));
         match ureq::get(&url)
             .timeout(std::time::Duration::from_secs(5))
             .call()
@@ -227,7 +163,7 @@ pub struct BackfillResult {
     pub message: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn embedding_backfill(batch_size: Option<u32>) -> Result<BackfillResult, String> {
     let cfg = crate::config::desktop_config_get();
     if !cfg.embedding_enabled {
@@ -237,7 +173,7 @@ pub fn embedding_backfill(batch_size: Option<u32>) -> Result<BackfillResult, Str
         return Err("no embedding API key is stored — add one in Settings first".into());
     }
 
-    let url = format!("{}/api/_admin/backfill-embeddings", ce_base_url());
+    let url = format!("{}/api/_admin/backfill-embeddings", ce_base_url(&cfg));
     let batch = batch_size.unwrap_or(cfg.embedding_batch_size).clamp(1, 100);
 
     let body = serde_json::json!({ "batch_size": batch }).to_string();
@@ -268,9 +204,10 @@ pub fn embedding_backfill(batch_size: Option<u32>) -> Result<BackfillResult, Str
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn embedding_rebuild_index() -> Result<String, String> {
-    let url = format!("{}/api/_admin/rebuild-vector-index", ce_base_url());
+    let cfg = crate::config::desktop_config_get();
+    let url = format!("{}/api/_admin/rebuild-vector-index", ce_base_url(&cfg));
     let resp = ureq::post(&url)
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(60))

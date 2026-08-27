@@ -97,7 +97,6 @@ fn main() {
             embedding::embedding_key_get,
             embedding::embedding_key_set,
             embedding::embedding_key_clear,
-            embedding::embedding_presets,
             embedding::embedding_status,
             embedding::embedding_backfill,
             embedding::embedding_rebuild_index,
