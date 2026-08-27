@@ -20,6 +20,38 @@ pub struct DesktopConfig {
     /// setup wizard's explicit 7-field writes — deserializing cleanly.
     #[serde(default)]
     pub autostart_infra: bool,
+    /// Vector search / embedding — optional, opt-in.
+    #[serde(default)]
+    pub embedding_enabled: bool,
+    #[serde(default = "default_embedding_provider")]
+    pub embedding_provider: String,
+    #[serde(default = "default_embedding_model")]
+    pub embedding_model: String,
+    #[serde(default = "default_embedding_dimensions")]
+    pub embedding_dimensions: u32,
+    #[serde(default)]
+    pub embedding_endpoint: String,
+    /// None = auto (true for OpenAI default endpoint, false otherwise).
+    #[serde(default)]
+    pub embedding_send_dimensions: Option<bool>,
+    #[serde(default = "default_embedding_batch_size")]
+    pub embedding_batch_size: u32,
+}
+
+fn default_embedding_provider() -> String {
+    "openai".to_string()
+}
+
+fn default_embedding_model() -> String {
+    "text-embedding-3-small".to_string()
+}
+
+fn default_embedding_dimensions() -> u32 {
+    1536
+}
+
+fn default_embedding_batch_size() -> u32 {
+    20
 }
 
 impl Default for DesktopConfig {
@@ -33,6 +65,13 @@ impl Default for DesktopConfig {
             use_redis: true,
             local_user: String::new(),
             autostart_infra: false,
+            embedding_enabled: false,
+            embedding_provider: default_embedding_provider(),
+            embedding_model: default_embedding_model(),
+            embedding_dimensions: default_embedding_dimensions(),
+            embedding_endpoint: String::new(),
+            embedding_send_dimensions: None,
+            embedding_batch_size: default_embedding_batch_size(),
         }
     }
 }

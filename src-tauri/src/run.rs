@@ -29,6 +29,58 @@ const CE_PROCESS_MARKER_FILE: &str = "ce-process.json";
 const CE_PROCESS_INTENT_FILE: &str = "ce-process-starting";
 const NEO4J_MIN_PASSWORD_LENGTH: usize = 8;
 
+// ---------------------------------------------------------------------------
+// Embedding env injection — reads DesktopConfig + keyring and injects the
+// KUMIHO_* vars Desktop owns. The API key itself stays in the OS vault and
+// is only exposed as OPENAI_API_KEY for the child process (never written to
+// server.toml).
+// ---------------------------------------------------------------------------
+
+fn apply_embedding_env(cmd: &mut std::process::Command) {
+    let cfg = crate::config::desktop_config_get();
+    if !cfg.embedding_enabled {
+        return;
+    }
+    let Some(api_key) = crate::embedding::embedding_api_key() else {
+        return;
+    };
+    if api_key.trim().is_empty() {
+        return;
+    }
+    cmd.env("KUMIHO_VECTOR_INDEX_ENABLED", "true");
+    cmd.env("OPENAI_API_KEY", api_key);
+    // Provider is always "openai" for now (BGE-M3 via OpenAI-compatible endpoint
+    // still uses the openai provider path). Preserve the stored value so a
+    // future multi-provider server can honour it.
+    let provider = if cfg.embedding_provider.trim().is_empty() {
+        "openai"
+    } else {
+        cfg.embedding_provider.trim()
+    };
+    cmd.env("KUMIHO_EMBEDDING_PROVIDER", provider);
+    if !cfg.embedding_model.trim().is_empty() {
+        cmd.env("KUMIHO_EMBEDDING_MODEL", cfg.embedding_model.trim());
+    }
+    if cfg.embedding_dimensions > 0 {
+        cmd.env(
+            "KUMIHO_VECTOR_DIMENSIONS",
+            cfg.embedding_dimensions.to_string(),
+        );
+    }
+    let endpoint = cfg.embedding_endpoint.trim();
+    if !endpoint.is_empty() {
+        cmd.env("KUMIHO_EMBEDDING_ENDPOINT", endpoint);
+    }
+    if let Some(send) = cfg.embedding_send_dimensions {
+        cmd.env(
+            "KUMIHO_EMBEDDING_SEND_DIMENSIONS",
+            if send { "true" } else { "false" },
+        );
+    }
+    // Batch size is a Desktop-side concern for backfill; the server reads it
+    // per-request. No env var needed, but keep it in desktop.json for the UI.
+}
+
 #[derive(Deserialize, Serialize)]
 struct CeProcessMarker {
     pid: u32,
@@ -809,6 +861,7 @@ pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
         .and_then(|out| out.try_clone().ok().map(|err| (out, err)));
     let mut cmd = command(bin.to_str().ok_or("bad path")?);
     cmd.env("KUMIHO_CONFIG", &cfg);
+    apply_embedding_env(&mut cmd);
     match log_files {
         Some((out, err)) => cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err)),
         None => cmd.stdout(Stdio::null()).stderr(Stdio::null()),
