@@ -440,32 +440,60 @@ fn health_response_ok(response: &[u8]) -> bool {
 struct RuntimeStamp {
     pid: u32,
     version: String,
+    identity: String,
 }
 
 fn runtime_stamp_path() -> Option<PathBuf> {
     Some(install_root()?.join("runtime.json"))
 }
 
-fn write_runtime_stamp(pid: u32, version: &str) {
-    let Some(path) = runtime_stamp_path() else {
-        return;
+fn is_revka_process_identity(identity: &str) -> bool {
+    let Some(name) = identity.split(['|', '/', '\\', ' ', '\t']).next_back() else {
+        return false;
     };
-    if let Ok(text) = serde_json::to_string(&RuntimeStamp {
-        pid,
-        version: version.to_owned(),
-    }) {
-        // Temp file + rename: a concurrent reader must never see truncated
-        // JSON and misread the running daemon as unknown/stale.
-        let tmp = path.with_extension("json.tmp");
-        if fs::write(&tmp, text).is_ok() {
-            let _ = fs::rename(&tmp, &path);
-        }
-    }
+    name.eq_ignore_ascii_case(binary_name())
+        || name.eq_ignore_ascii_case(binary_name().trim_end_matches(".exe"))
 }
 
-fn read_runtime_stamp() -> Option<RuntimeStamp> {
-    let text = fs::read_to_string(runtime_stamp_path()?).ok()?;
-    serde_json::from_str(&text).ok()
+fn runtime_identity_matches(expected: &str, current: Option<&str>) -> bool {
+    current == Some(expected) && is_revka_process_identity(expected)
+}
+
+fn write_runtime_stamp(pid: u32, version: &str) -> Result<(), String> {
+    let path = runtime_stamp_path().ok_or("no home directory")?;
+    let identity = crate::run::process_identity(pid)?
+        .ok_or("spawned Revka process disappeared before it could be recorded")?;
+    if !is_revka_process_identity(&identity) {
+        return Err("spawned process identity did not match Revka".into());
+    }
+    let text = serde_json::to_string(&RuntimeStamp {
+        pid,
+        version: version.to_owned(),
+        identity,
+    })
+    .map_err(|e| e.to_string())?;
+    // Temp file + rename: a concurrent reader must never see truncated JSON
+    // and misread the running daemon as unknown/stale.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("could not record the running Revka process: {e}")
+    })
+}
+
+fn read_runtime_stamp() -> Result<Option<RuntimeStamp>, String> {
+    let Some(path) = runtime_stamp_path() else {
+        return Ok(None);
+    };
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("invalid Revka runtime record: {e}"))
 }
 
 fn clear_runtime_stamp() {
@@ -479,7 +507,13 @@ fn runtime_state() -> (bool, Option<String>) {
     if !health_probe() {
         return (false, None);
     }
-    (true, read_runtime_stamp().map(|stamp| stamp.version))
+    (
+        true,
+        validated_runtime_stamp()
+            .ok()
+            .flatten()
+            .map(|stamp| stamp.version),
+    )
 }
 
 fn is_stale(installed: Option<&str>, reachable: bool, serving: Option<&str>) -> bool {
@@ -511,47 +545,46 @@ fn wait_for_port_closed(timeout: Duration) -> bool {
     }
 }
 
-/// Kill Revka daemons this Desktop session does not own — leftovers from a
-/// previous session, which `state.revka` knows nothing about.
-fn kill_orphan_revka(force: bool) {
-    let Some(binary) = installed_binary() else {
-        return;
+fn validated_runtime_stamp() -> Result<Option<RuntimeStamp>, String> {
+    let Some(stamp) = read_runtime_stamp()? else {
+        return Ok(None);
     };
-    #[cfg(windows)]
-    {
-        let _ = (binary, force);
-        let _ = command("taskkill")
-            .args(["/IM", binary_name(), "/T", "/F"])
-            .output();
-    }
-    #[cfg(not(windows))]
-    {
-        let Some(path) = binary.to_str() else {
-            return;
-        };
-        let signal = if force { "-KILL" } else { "-TERM" };
-        let _ = command("pkill").args([signal, "-f", path]).output();
+    match crate::run::process_identity(stamp.pid)? {
+        current if runtime_identity_matches(&stamp.identity, current.as_deref()) => Ok(Some(stamp)),
+        _ => {
+            // The recorded process is gone. A reused PID — even another Revka
+            // process — is not ours and must never inherit this record.
+            clear_runtime_stamp();
+            Ok(None)
+        }
     }
 }
 
 fn terminate_tracked(
     process: &Mutex<Option<std::process::Child>>,
     grace: Duration,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let child = process.lock().map_err(|e| e.to_string())?.take();
     let Some(mut child) = child else {
-        return Ok(());
+        return Ok(false);
     };
     #[cfg(windows)]
     {
         let _ = grace;
-        let pid = child.id().to_string();
-        let _ = command("taskkill")
-            .args(["/PID", &pid, "/T", "/F"])
-            .output();
+        // Child keeps the Windows process handle, so this cannot hit a PID
+        // reuse replacement the way a later `taskkill /PID` subprocess could.
+        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            child.kill().map_err(|e| e.to_string())?;
+        }
     }
     #[cfg(unix)]
     {
+        // std::process::Child::kill is SIGKILL on Unix. Give Revka a normal
+        // shutdown first so stop, update, and app exit do not always wait out
+        // the grace period and then force-kill it.
+        // SAFETY: this PID belongs to the live Child handle we just removed
+        // from Desktop state; ESRCH is harmless and handled by try_wait.
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
         let deadline = std::time::Instant::now() + grace;
         loop {
             match child.try_wait() {
@@ -560,31 +593,63 @@ fn terminate_tracked(
                     std::thread::sleep(Duration::from_millis(150));
                 }
                 _ => {
-                    let _ = child.kill();
+                    if let Err(error) = child.kill() {
+                        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+                            return Err(format!("could not stop Revka: {error}"));
+                        }
+                    }
                     break;
                 }
             }
         }
     }
-    let _ = child.wait();
-    Ok(())
+    child.wait().map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
-/// Stop every Revka daemon on this machine and do not return until 42617 is free.
+/// Stop only a Revka daemon represented by this process's live Child handle.
+/// A record from a previous Desktop session is useful for status, but cannot
+/// make a later PID signal race-free; fail closed instead of risking another
+/// Revka command or a PID-reuse replacement.
 /// Caller must hold [`lifecycle_lock`].
 fn stop_revka(state: &AppState) -> Result<(), String> {
-    terminate_tracked(&state.revka, STOP_GRACE)?;
-    kill_orphan_revka(false);
-    if !wait_for_port_closed(STOP_GRACE) {
-        kill_orphan_revka(true);
-        if !wait_for_port_closed(Duration::from_secs(3)) {
-            return Err(
-                "Revka is still holding 127.0.0.1:42617 — stop it manually and try again".into(),
-            );
+    let stopped_tracked = terminate_tracked(&state.revka, STOP_GRACE)?;
+    if stopped_tracked {
+        if wait_for_port_closed(Duration::from_secs(3)) {
+            clear_runtime_stamp();
+            return Ok(());
+        }
+        return Err(
+            "Revka's tracked process exited, but 127.0.0.1:42617 is still occupied; stop that specific process manually and try again".into(),
+        );
+    }
+
+    match validated_runtime_stamp() {
+        Ok(Some(stamp)) => Err(format!(
+            "Revka from a previous Desktop session is still running (PID {}). Desktop will not signal a cross-session PID; stop that specific process manually and try again",
+            stamp.pid
+        )),
+        Ok(None) => {
+            if wait_for_port_closed(Duration::from_millis(400)) {
+                clear_runtime_stamp();
+                Ok(())
+            } else {
+                Err(
+                    "127.0.0.1:42617 is held by a process Desktop did not start; stop that specific process manually and try again".into(),
+                )
+            }
+        }
+        Err(error) => {
+            if wait_for_port_closed(Duration::from_millis(400)) {
+                clear_runtime_stamp();
+                Ok(())
+            } else {
+                Err(format!(
+                    "Revka on 127.0.0.1:42617 could not be matched to Desktop's process record ({error}); stop that specific process manually and try again"
+                ))
+            }
         }
     }
-    clear_runtime_stamp();
-    Ok(())
 }
 
 /// Serializes every mutation of Revka's lifecycle — stop, binary swap, spawn.
@@ -595,19 +660,35 @@ fn lifecycle_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, ()>, Str
 /// Caller must hold [`lifecycle_lock`].
 fn start_revka(state: &AppState) -> Result<String, String> {
     let (reachable, serving) = runtime_state();
-    if reachable {
-        if !is_stale(installed_version().as_deref(), true, serving.as_deref()) {
-            return Ok("Revka already serving on 42617".into());
-        }
-        stop_revka(state)?;
+    if reachable && !is_stale(installed_version().as_deref(), true, serving.as_deref()) {
+        return Ok("Revka already serving on 42617".into());
     }
 
     {
         let mut tracked = state.revka.lock().map_err(|e| e.to_string())?;
         match tracked.as_mut().map(std::process::Child::try_wait) {
-            Some(Ok(None)) => return Ok("Revka is already starting on 42617".into()),
+            Some(Ok(None)) if !reachable => return Ok("Revka is already starting on 42617".into()),
+            Some(Ok(None)) => {}
             Some(_) => *tracked = None,
             None => {}
+        }
+    }
+
+    if reachable {
+        stop_revka(state)?;
+    } else if runtime_stamp_path().is_some_and(|path| path.exists()) {
+        // A prior Desktop may have exited while its daemon was still starting.
+        // A validated cross-session process is reported for manual recovery;
+        // a legacy/corrupt record is discarded only while the port is free.
+        if !wait_for_port_closed(Duration::from_millis(400)) {
+            return Err(
+                "127.0.0.1:42617 is occupied, but the saved Revka process record cannot be verified; stop that specific process manually and try again".into(),
+            );
+        }
+        match validated_runtime_stamp() {
+            Ok(Some(_)) => stop_revka(state)?,
+            Ok(None) => {}
+            Err(_) => clear_runtime_stamp(),
         }
     }
 
@@ -640,7 +721,12 @@ fn start_revka(state: &AppState) -> Result<String, String> {
         .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|e| e.to_string())?;
-    write_runtime_stamp(child.id(), &installed_version().unwrap_or_default());
+    let mut child = child;
+    if let Err(error) = write_runtime_stamp(child.id(), &installed_version().unwrap_or_default()) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     *state.revka.lock().map_err(|e| e.to_string())? = Some(child);
     Ok(format!("Revka starting on {REVKA_PORT}"))
 }
@@ -649,8 +735,9 @@ fn start_revka(state: &AppState) -> Result<String, String> {
 /// the next session's update has to fight.
 pub fn kill_tracked_revka(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    let _ = terminate_tracked(&state.revka, EXIT_GRACE);
-    clear_runtime_stamp();
+    if matches!(terminate_tracked(&state.revka, EXIT_GRACE), Ok(true)) {
+        clear_runtime_stamp();
+    }
 }
 
 #[derive(Serialize)]
@@ -809,7 +896,7 @@ pub fn revka_pty_stop(state: State<AppState>) -> Result<(), String> {
 mod tests {
     use super::{
         checksum_for, health_response_ok, installed_version_at, is_stale, newer_version_available,
-        parse_release, release_asset_name, replace_runtime, tag_version,
+        parse_release, release_asset_name, replace_runtime, runtime_identity_matches, tag_version,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -902,6 +989,36 @@ mod tests {
         // Unknown serving version cannot be proven current, so restart it.
         assert!(is_stale(Some("2026.6.30"), true, None));
         assert!(!is_stale(None, true, None));
+    }
+
+    #[test]
+    fn runtime_identity_must_match_the_recorded_revka_process_exactly() {
+        let expected = if cfg!(windows) {
+            "638921234567890000|revka"
+        } else {
+            "Sun Aug 31 08:00:00 2026 revka"
+        };
+        assert!(runtime_identity_matches(expected, Some(expected)));
+        assert!(!runtime_identity_matches(
+            expected,
+            Some(if cfg!(windows) {
+                "638921234567890001|revka"
+            } else {
+                "Sun Aug 31 08:00:01 2026 revka"
+            })
+        ));
+        assert!(!runtime_identity_matches(
+            if cfg!(windows) {
+                "638921234567890000|notepad"
+            } else {
+                "Sun Aug 31 08:00:00 2026 sleep"
+            },
+            Some(if cfg!(windows) {
+                "638921234567890000|notepad"
+            } else {
+                "Sun Aug 31 08:00:00 2026 sleep"
+            })
+        ));
     }
 
     #[test]

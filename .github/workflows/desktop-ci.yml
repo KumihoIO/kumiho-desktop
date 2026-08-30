@@ -1,0 +1,51 @@
+name: desktop-ci
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test-${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+          - platform: linux-x64
+            os: ubuntu-22.04
+          - platform: macos-arm64
+            os: macos-15
+          - platform: macos-x64
+            os: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Desktop Node regression checks
+        shell: bash
+        run: |
+          node scripts/test-active-server-health.cjs
+          node scripts/test-ce-setup.cjs
+          node scripts/test-desktop-release-gate.cjs
+          node scripts/test-html5-file-drop.cjs
+          node scripts/test-9miho-update.cjs
+          node scripts/test-revka-lifecycle.cjs
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux system dependencies (Tauri / WebKitGTK)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+            libdbus-1-dev pkg-config
+
+      - name: Desktop unit tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked

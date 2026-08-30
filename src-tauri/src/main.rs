@@ -10,6 +10,7 @@ mod account;
 mod config;
 mod connect;
 mod docker;
+mod embedding;
 mod memory;
 mod miho;
 mod pty;
@@ -24,9 +25,14 @@ mod window;
 use std::sync::Mutex;
 use tauri::Manager;
 
-/// App-wide state: the Brain dashboard child we started (so we can stop it).
+/// App-wide state for child processes started by Desktop.
 #[derive(Default)]
 pub struct AppState {
+    /// The CE server child, retained so failed startup can prove it exited
+    /// before restoring a previous password-bearing config.
+    pub ce: Mutex<Option<std::process::Child>>,
+    /// Held across CE's check-then-spawn sequence to prevent duplicate starts.
+    pub ce_start: Mutex<()>,
     pub brain: Mutex<Option<std::process::Child>>,
     pub miho: Mutex<Option<std::process::Child>>,
     /// Held across 9miho's check-then-spawn so two UI paths cannot both decide
@@ -64,8 +70,12 @@ fn main() {
             run::ce_health,
             run::ce_install,
             run::ce_configure,
+            run::ce_configure_commit,
+            run::ce_configure_pending,
+            run::ce_configure_rollback,
             run::ce_start,
             run::ce_stop,
+            run::ce_log_tail,
             run::brain_status,
             run::brain_start,
             run::brain_stop,
@@ -100,6 +110,14 @@ fn main() {
             account::account_set_token,
             account::account_clear_token,
             account::cloud_probe,
+            // Embedding — CE vector-search key in the OS keychain + backfill
+            embedding::embedding_key_status,
+            embedding::embedding_key_get,
+            embedding::embedding_key_set,
+            embedding::embedding_key_clear,
+            embedding::embedding_status,
+            embedding::embedding_backfill,
+            embedding::embedding_rebuild_index,
             // Connect — per-host plugin install
             connect::connect_hosts,
             connect::connect_check_updates,
@@ -122,6 +140,7 @@ fn main() {
             // install/update can't replace it (the reinstall conflict). Kill it
             // as we exit.
             tauri::RunEvent::ExitRequested { .. } => {
+                run::kill_pending_ce(app);
                 run::kill_brain();
                 miho::kill_tracked_miho(app);
                 revka::kill_tracked_revka(app);

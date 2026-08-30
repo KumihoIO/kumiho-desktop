@@ -5,7 +5,7 @@
 # Own [workspace] so it stays independent of the root kumiho-brain crate.
 [package]
 name = "kumiho-desktop"
-version = "0.4.2"
+version = "0.4.5"
 edition = "2021"
 rust-version = "1.77"
 description = "Kumiho Desktop — control center for Kumiho Memory, 9miho, and CE/Cloud connections"

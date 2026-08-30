@@ -1,0 +1,41 @@
+# Kumiho Desktop 0.4.4
+
+## Safer Community Edition setup on macOS and existing databases
+
+- Desktop now finds Docker Desktop from its standard macOS application path
+  even when a GUI launch does not inherit the terminal's `PATH`. Intel and
+  Apple silicon Homebrew command locations are also supported, and a stale CLI
+  no longer hides a working fallback. Mutating Docker commands still run once.
+- Neo4j passwords are validated before setup begins. New containers require at
+  least eight characters, matching Neo4j's own minimum, and passwords containing
+  quotes or backslashes are preserved correctly in `server.toml`.
+- An existing Neo4j container is never silently removed or recreated. When its
+  original password differs from the one entered in Desktop, setup explains the
+  mismatch and keeps the database intact.
+- A candidate CE configuration is committed only after both the server and Neo4j
+  report healthy. Failed starts stop the candidate server and restore the prior
+  configuration, so retrying cannot overwrite a known-working password. Desktop
+  records the exact startup PID and process-start identity across app restarts;
+  same-session cleanup uses its retained process handle and never kills every
+  `kumiho_server` on the machine. Cross-session recovery never signals a reused
+  PID: it fails closed, preserves the pending config, and gives a manual PID.
+- Config candidates and rollback records are written and published atomically.
+  macOS and Linux synchronize their containing directory before the live config
+  changes; Windows uses write-through atomic moves and durable tombstones. This
+  keeps recovery records usable across interrupted setup and power loss.
+- Password-bearing candidate, backup, and final configuration files remain
+  owner-readable only (`0600`) on macOS and Linux.
+- Start, stop, restart, database controls, update, and automatic startup share
+  one action lock. A server retained from an earlier Desktop session is labeled
+  as requiring a manual stop instead of presenting an unsafe automatic action.
+  Runtime controls now stay disabled while an action is running, and Start is
+  disabled whenever Community Edition is already serving or has a managed start
+  pending. Automatic startup runs Docker work off the UI thread, uses a real
+  native deadline, terminates a stuck CLI child, bounds inherited output pipes,
+  and preserves the Docker error instead of overlapping the later server action
+  or hiding the root cause.
+- Pull requests and releases run the CE regression suite on Windows, Linux,
+  Apple silicon macOS, and Intel macOS. Release jobs require an existing tag
+  whose peeled commit, workflow SHA, Cargo version, and Tauri version all match;
+  that identity is checked again around draft-release creation so a moved tag
+  cannot attach artifacts built from another commit.

@@ -147,11 +147,28 @@
         <label class="field"><span class="lab">Server port</span><input id="f-server" class="mono" value="9190"></label>
         <label class="field"><span class="lab">Your name (memory author)</span><input id="f-user" placeholder="isake"></label>
         <label class="field"><span class="lab">Neo4j port</span><input id="f-neo" class="mono" value="7687"></label>
-        <label class="field"><span class="lab">Neo4j password</span><input id="f-pass" type="password" placeholder="choose a local password"></label>
+        <label class="field"><span class="lab">Neo4j password</span><input id="f-pass" type="password" minlength="8" oninput="validateNeo4jPassword()" autocomplete="new-password" aria-describedby="f-pass-help" aria-invalid="false" placeholder="at least 8 characters"><span id="f-pass-help" class="faint" aria-live="polite" style="display:block;font-size:11.5px;margin-top:5px">At least 8 characters.</span></label>
         <label class="field"><span class="lab">Redis port (optional — event stream)</span><input id="f-redis" class="mono" value="6379"></label>
         <label class="field" style="display:flex;align-items:flex-end;gap:8px"><input id="f-usered" type="checkbox" checked style="width:auto;height:auto"><span class="lab" style="margin:0">Run Redis</span></label>
       </div>
       <label class="row" style="margin-top:14px;font-size:13px;color:var(--dim)"><input id="f-eula" type="checkbox" style="width:auto;height:auto"><span>I accept the <a href="https://github.com/KumihoIO/kumiho-server-community/blob/main/EULA.md" target="_blank">Community Edition EULA</a> (free, single-user).</span></label>
+      <div class="card" id="ce-embed-card" style="margin-top:14px">
+        <label class="row" style="gap:8px;cursor:pointer"><input type="checkbox" id="f-embed-enabled" onchange="toggleWizardEmbedding()" style="width:auto;height:auto"><span class="b">Enable vector search (embeddings)</span> <span class="faint" style="font-size:12px">optional · improves recall</span></label>
+        <div id="f-embed-fields" style="display:none;margin-top:12px">
+          <label class="field" style="margin-bottom:10px"><span class="lab">Preset</span><select id="f-embed-preset" onchange="applyWizardPreset()"></select></label>
+          <div class="grid2">
+            <label class="field"><span class="lab">Provider</span><select id="f-embed-provider" onchange="markWizardEmbeddingDirty()"><option value="openai">OpenAI-compatible (OpenAI, BGE-M3, TEI, vLLM)</option></select></label>
+            <label class="field"><span class="lab">Model</span><input id="f-embed-model" placeholder="text-embedding-3-small" oninput="markWizardEmbeddingDirty()"></label>
+            <label class="field"><span class="lab">API key</span><input id="f-embed-key" type="password" autocomplete="off" placeholder="sk-… or provider key" oninput="markWizardEmbeddingDirty()"></label>
+            <label class="field"><span class="lab">Dimensions</span><input id="f-embed-dims" class="mono" type="number" min="64" max="4096" placeholder="1536" oninput="markWizardEmbeddingDirty()"></label>
+            <label class="field" style="grid-column:1/-1"><span class="lab">Endpoint (optional — leave blank for OpenAI)</span><input id="f-embed-endpoint" class="mono" placeholder="https://api.openai.com/v1/embeddings or your BGE-M3 URL" oninput="markWizardEmbeddingDirty()"></label>
+            <label class="field"><span class="lab">Send dimensions param</span><select id="f-embed-send-dims" onchange="markWizardEmbeddingDirty()"><option value="auto">Auto (recommended)</option><option value="true">Always send</option><option value="false">Never send (BGE-M3)</option></select></label>
+            <label class="field"><span class="lab">Backfill batch size</span><select id="f-embed-batch" onchange="markWizardEmbeddingDirty()"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></label>
+          </div>
+          <p class="dim" style="font-size:12px;margin:8px 0 0">API key is stored in your OS keychain (Keychain / Credential Manager), never in a file. You can add or change this later in Settings → General.</p>
+          <div class="faint" id="f-embed-help" style="font-size:11.5px;margin-top:6px"></div>
+        </div>
+      </div>
       <div id="docker-help" style="display:none">
         <div class="card req">
           <div class="row"><span class="pill off">Docker not detected</span></div>
@@ -166,7 +183,7 @@
         <div class="step" data-s="start"><span class="n">4</span> Start the server</div>
       </div>
       <div class="row" style="margin-top:16px"><button id="ce-btn" class="primary grow" onclick="setupCE()">Install &amp; start Community Edition</button></div>
-      <div class="log" id="ce-log"></div>
+      <div class="log" id="ce-log" role="status" aria-live="polite" aria-atomic="true"></div>
     </div>
     <div id="cloud-form" style="display:none">
       <p class="dim" style="font-size:13px;margin-top:16px">Sign in on the web to create a token, then paste a <b>service token</b> (1-year) here — stored in your OS keychain, never in a file.</p>
@@ -249,20 +266,43 @@
               <label class="field"><span class="lab">Redis port</span><input id="s-redis" class="mono" type="number" min="1" max="65535" oninput="markSettingsDirty()"></label>
             </div>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:12px"><input type="checkbox" id="s-use-redis" onchange="markSettingsDirty()"><span>Use Redis event stream</span></label>
-            <div class="row"><button class="primary" onclick="ceRestart()">Restart server</button><button onclick="cmd('ce_start','general')">Start</button><button onclick="cmd('ce_stop','general')">Stop</button></div>
+            <div class="row"><button id="ce-restart-btn" class="primary" onclick="ceRestart()" disabled>Restart server</button><button id="ce-start-btn" onclick="ceStart()" disabled>Start</button><button id="ce-stop-btn" onclick="ceStop()" disabled>Stop</button></div>
             <div class="row" id="ce-update" style="font-size:12.5px"></div>
           </div>
           <div class="card">
             <div class="row"><div class="grow"><span class="b">Databases</span> <span class="faint">Docker</span></div><span class="pill" id="docker-pill">…</span></div>
             <div class="row" style="font-size:13px" id="db-lines"></div>
-            <div class="row"><button onclick="dbUp()">Start databases</button><button onclick="cmd('docker_down','general')">Stop databases</button></div>
+            <div class="row"><button id="db-start-btn" onclick="dbUp()">Start databases</button><button id="db-stop-btn" onclick="dbDown()">Stop databases</button></div>
           </div>
           <div class="card">
             <div class="row"><div class="grow"><span class="b">Startup</span> <span class="faint">run Kumiho hands-free</span></div></div>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:8px"><input type="checkbox" id="cb-login" onchange="markSettingsDirty()"><span>Launch Kumiho Desktop when I sign in</span></label>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:6px"><input type="checkbox" id="cb-infra" onchange="markSettingsDirty()"><span>Start the CE server and databases automatically</span></label>
           </div>
-          <div class="log" id="log-general"></div>
+          <div class="card" id="ce-embed-settings">
+            <div class="row"><div class="grow"><span class="b">Vector search</span> <span class="faint">optional · embeddings</span></div><span class="pill" id="embed-pill">…</span></div>
+            <label class="row" style="gap:8px;cursor:pointer;margin-top:10px"><input type="checkbox" id="s-embed-enabled" onchange="toggleSettingsEmbedding()"><span>Enable vector search (embeddings)</span></label>
+            <div id="s-embed-fields" style="display:none;margin-top:12px">
+              <label class="field" style="margin-bottom:10px"><span class="lab">Preset</span><select id="s-embed-preset" onchange="applySettingsPreset()"></select></label>
+              <div class="grid2">
+                <label class="field"><span class="lab">Provider</span><select id="s-embed-provider" onchange="markSettingsDirty()"><option value="openai">OpenAI-compatible (OpenAI, BGE-M3, TEI, vLLM)</option></select></label>
+                <label class="field"><span class="lab">Model</span><input id="s-embed-model" placeholder="text-embedding-3-small" oninput="markSettingsDirty()"></label>
+                <label class="field"><span class="lab">API key</span><input id="s-embed-key" type="password" autocomplete="off" placeholder="Leave blank to keep stored key" oninput="markSettingsDirty()"></label>
+                <label class="field"><span class="lab">Dimensions</span><input id="s-embed-dims" class="mono" type="number" min="64" max="4096" placeholder="1536" oninput="markSettingsDirty()"></label>
+                <label class="field" style="grid-column:1/-1"><span class="lab">Endpoint (optional)</span><input id="s-embed-endpoint" class="mono" placeholder="https://api.openai.com/v1/embeddings or your BGE-M3 URL" oninput="markSettingsDirty()"></label>
+                <label class="field"><span class="lab">Send dimensions param</span><select id="s-embed-send-dims" onchange="markSettingsDirty()"><option value="auto">Auto (recommended)</option><option value="true">Always send</option><option value="false">Never send (BGE-M3)</option></select></label>
+                <label class="field"><span class="lab">Backfill batch size</span><select id="s-embed-batch" onchange="markSettingsDirty()"><option value="10">10</option><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></label>
+              </div>
+              <div class="faint" id="s-embed-help" style="font-size:11.5px;margin-top:6px"></div>
+              <div class="row" style="margin-top:12px;flex-wrap:wrap">
+                <button class="sm" id="embed-backfill-btn" onclick="backfillEmbeddings()">Backfill embeddings</button>
+                <button class="sm" id="embed-rebuild-btn" onclick="rebuildVectorIndex()" title="Required when you change embedding model/dimensions">Rebuild vector index</button>
+                <span class="faint" id="embed-status-text" style="font-size:12px"></span>
+              </div>
+              <p class="dim" style="font-size:12px;margin:8px 0 0">API key is stored in your OS keychain. Leave blank to keep the existing key. Changing model or dimensions requires <b>Rebuild vector index</b> + <b>Backfill</b>.</p>
+            </div>
+          </div>
+          <div class="log" id="log-general" role="status" aria-live="polite" aria-atomic="true"></div>
         </div>
 
         <div class="mode-panel" id="mode-cloud">
@@ -347,13 +387,18 @@
 <div class="toast" id="toast"></div>
 
 <script src="./server-health.js"></script>
+<script src="./ce-setup.js"></script>
+<script src="./embedding.js"></script>
 <script src="./assets/vendor/xterm.js"></script>
 <script src="./assets/vendor/addon-fit.js"></script>
 <script>
   const T = window.__TAURI__;
   const invoke = (c,a) => T.core.invoke(c,a);
   const $ = (id) => document.getElementById(id);
-  const setLog = (id,msg,bad) => {const e=$('log-'+id)||$(id+'-log');if(!e)return;e.textContent=msg||'';e.className='log'+(bad?' bad':'');};
+  // Also try the bare id: the first-run panels are literally id="ce-log" /
+  // id="cloud-log", which the two prefixed forms both miss — every wizard
+  // message (including step-4 failure diagnostics) was silently dropped.
+  const setLog = (id,msg,bad) => {const e=$('log-'+id)||$(id+'-log')||$(id);if(!e)return;e.textContent=msg||'';e.className='log'+(bad?' bad':'');};
   function openUrl(u){ try{ if(T.opener) T.opener.openUrl(u); else window.open(u,'_blank'); }catch(e){ window.open(u,'_blank'); } }
   let toastT; function toast(msg,bad){ const el=$('toast'); el.textContent=msg; el.className='toast show'+(bad?' bad':''); clearTimeout(toastT); toastT=setTimeout(()=>el.className='toast'+(bad?' bad':''),2600); }
 
@@ -371,11 +416,67 @@
       setTimeout(()=>{ btn.textContent=o; btn.classList.remove('primary'); },1600); }catch(e){ btn.textContent='select & copy'; } }
 
   // ---------- first-run setup ----------
+  // One lock covers setup, server/database actions, update, and autoboot.
+  let CE_STARTING=false;
+  let CE_ACTION='';
+  let CE_LAST_REACHABLE=false;
+  let CE_LAST_MANAGED=false;
+  let CE_LAST_STOPPABLE=true;
+  function validateNeo4jPassword(){ const input=$('f-pass'), help=$('f-pass-help'), error=KumihoDesktopCeSetup.neo4jPasswordError(input.value);
+    input.setCustomValidity(error); input.setAttribute('aria-invalid',error?'true':'false'); help.textContent=error||'At least 8 characters.'; help.style.color=error?'var(--bad)':''; return !error; }
+
+  // ---------- embedding wizard helpers ----------
+  function initWizardEmbeddingPresets(){
+    const sel=$('f-embed-preset'); if(!sel || sel.options.length) return;
+    KumihoDesktopEmbedding.PRESETS.forEach((p,i)=>{
+      const o=document.createElement('option'); o.value=String(i); o.textContent=p.label; sel.appendChild(o);
+    });
+    sel.value="0";
+    applyWizardPreset(true);
+  }
+  function toggleWizardEmbedding(){
+    const on=$('f-embed-enabled').checked;
+    $('f-embed-fields').style.display=on?'block':'none';
+    if(on) initWizardEmbeddingPresets();
+  }
+  function applyWizardPreset(silent){
+    const idx=+$('f-embed-preset').value||0;
+    const preset=KumihoDesktopEmbedding.PRESETS[idx];
+    if(!preset) return;
+    const fields={ provider:$('f-embed-provider'), model:$('f-embed-model'), dimensions:$('f-embed-dims'), endpoint:$('f-embed-endpoint'), sendDimensions:$('f-embed-send-dims'), batchSize:$('f-embed-batch') };
+    KumihoDesktopEmbedding.applyPresetToFields(preset, fields);
+    if(!silent) markWizardEmbeddingDirty();
+  }
+  function markWizardEmbeddingDirty(){
+    const help=$('f-embed-help');
+    if(!help) return;
+    const cfg=collectWizardEmbedding();
+    const err=KumihoDesktopEmbedding.validateEmbeddingConfig(cfg);
+    help.textContent=err|| (cfg.enabled ? 'Vector search will be enabled on this install.' : '');
+    help.style.color=err?'var(--bad)':'';
+  }
+  function collectWizardEmbedding(){
+    return {
+      enabled: !!$('f-embed-enabled')?.checked,
+      provider: $('f-embed-provider')?.value||'openai',
+      model: $('f-embed-model')?.value?.trim()||'',
+      dimensions: +$('f-embed-dims')?.value||0,
+      endpoint: $('f-embed-endpoint')?.value?.trim()||'',
+      send_dimensions: ($('f-embed-send-dims')?.value==='auto'?null:$('f-embed-send-dims')?.value==='true'),
+      api_key: $('f-embed-key')?.value?.trim()||'',
+      batch_size: +$('f-embed-batch')?.value||20,
+    };
+  }
   async function pick(m){ $('ch-ce').classList.toggle('sel',m==='ce'); $('ch-cloud').classList.toggle('sel',m==='cloud');
     $('ce-form').style.display = m==='ce'?'block':'none'; $('cloud-form').style.display = m==='cloud'?'block':'none';
     if(m==='ce'){ const btn=$('ce-btn');
-      try{ const st=await invoke('ce_status');
-        if(st.reachable){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
+      if(btn) btn.disabled=CE_STARTING;
+      try{ const st=await invoke('ce_status'), ready=st.reachable && await ceReady();
+        if(ready){ setLog('ce-log','✓ Community Edition is already running (v'+(st.version||'?')+'). Just click continue.'); if(btn) btn.textContent='Continue — CE is already running'; }
+        else if(st.reachable&&st.stoppable===false){ setLog('ce-log','Community Edition is running outside this Desktop session, but Neo4j is not ready. Recovery will show safe manual stop steps; Desktop will not signal that process.',true); if(btn) btn.textContent='Show manual recovery steps'; }
+        else if(st.reachable){ setLog('ce-log','Community Edition is running, but Neo4j is not ready. Repair will stop this Desktop session’s server and retry setup.',true); if(btn) btn.textContent='Repair & restart Community Edition'; }
+        else if(st.managed&&st.stoppable===false){ setLog('ce-log','A previous Community Edition start needs recovery. Continue to inspect it and show manual stop steps if it is still running; the pending config will be preserved.'); if(btn) btn.textContent='Recover / manual stop steps'; }
+        else if(st.managed){ setLog('ce-log','A Community Edition start from this Desktop session is still pending. Retry will stop it before changing the config.'); if(btn) btn.textContent='Recover Community Edition'; }
         else if(btn){ btn.textContent = st.installed ? 'Start Community Edition' : 'Install & start Community Edition'; }
       }catch(e){}
       // Docker heads-up + copy-paste install chips — only when a DB isn't already up and Docker is missing
@@ -390,34 +491,83 @@
       .catch(()=>{ if(Date.now()-t0>ms) return resolve(false); setTimeout(tick,800); }); })(); }); }
   async function adoptCE(){
     let cur={}; try{ cur=await invoke('desktop_config_get'); }catch(e){}
+    const embed=collectWizardEmbedding();
+    const embedErr=embed.enabled ? KumihoDesktopEmbedding.validateEmbeddingConfig(embed) : '';
+    if(embedErr){ setLog('ce-log',embedErr,true); return false; }
+    if(embed.enabled && embed.api_key){
+      try{ await invoke('embedding_key_set',{apiKey:embed.api_key}); }catch(e){ setLog('ce-log','Could not save embedding key: '+String(e),true); return false; }
+    }
     const cfg={ ...cur, configured:true, mode:'ce', server_port:+$('f-server').value||9190, neo4j_port:+$('f-neo').value||7687,
-      redis_port:+$('f-redis').value||6379, use_redis:$('f-usered').checked, local_user:$('f-user').value.trim()||'me' };
+      redis_port:+$('f-redis').value||6379, use_redis:$('f-usered').checked, local_user:$('f-user').value.trim()||'me',
+      embedding_enabled: !!embed.enabled, embedding_provider: embed.provider||'openai', embedding_model: embed.model||'text-embedding-3-small',
+      embedding_dimensions: embed.dimensions||1536, embedding_endpoint: embed.endpoint||'', embedding_send_dimensions: embed.send_dimensions,
+      embedding_batch_size: embed.batch_size||20 };
     try{ await invoke('desktop_config_set',{cfg}); }catch(e){}
     MODE='ce'; setLog('ce-log','✓ Community Edition ready. Opening…'); setTimeout(enterApp,700);
+    return true;
   }
   async function setupCE(){
+    if(CE_STARTING) return;
+    const button=$('ce-btn'), idleLabel=button.textContent;
+    CE_STARTING=true; $('ce-btn').disabled=true; button.textContent='Starting Community Edition…';
+    let completed=false, configPending=false, cleanupBlocked=false, failureMessage='';
     setLog('ce-log','');
-    let st; try{ st=await invoke('ce_status'); }catch(e){ setLog('ce-log',String(e),true); return; }
-    if(st.reachable){ await adoptCE(); return; }
-    if(!$('f-eula').checked){ setLog('ce-log','Please accept the EULA to continue.',true); return; }
-    const pass=$('f-pass').value.trim(); if(!pass){ setLog('ce-log','Set a Neo4j password.',true); return; }
-    const serverPort=+$('f-server').value||9190, neo4jPort=+$('f-neo').value||7687, redisPort=+$('f-redis').value||6379;
-    const useRedis=$('f-usered').checked, localUser=$('f-user').value.trim()||'me';
-    $('ce-steps').style.display='block';
     try{
+      const pendingConfig=await invoke('ce_configure_pending');
+      const st=await invoke('ce_status');
+      const ready=st.reachable && await ceReady();
+      if(ready){ await invoke('ce_configure_commit'); completed=await adoptCE(); return; }
+      if(pendingConfig){
+        await KumihoDesktopCeSetup.rollbackPendingCeSetup({invoke,stopCeAndWait});
+      }else if(st.reachable||st.managed) await stopCeAndWait();
+      if(!$('f-eula').checked){ setLog('ce-log','Please accept the EULA to continue.',true); return; }
+      const pass=$('f-pass').value.trim(), passError=KumihoDesktopCeSetup.neo4jPasswordError(pass);
+      if(passError){ validateNeo4jPassword(); setLog('ce-log',passError,true); return; }
+      const embedSetup=collectWizardEmbedding();
+      const embedSetupErr=embedSetup.enabled ? KumihoDesktopEmbedding.validateEmbeddingConfig(embedSetup) : '';
+      if(embedSetupErr){ setLog('ce-log',embedSetupErr,true); return; }
+      if(embedSetup.enabled && embedSetup.api_key){
+        try{ await invoke('embedding_key_set',{apiKey:embedSetup.api_key}); }catch(e){ setLog('ce-log','Could not save embedding key: '+String(e),true); return; }
+        // Persist embedding non-secret fields now so ce_start can inject them.
+        try{
+          const cur=await invoke('desktop_config_get');
+          const draft={ ...cur, embedding_enabled:true, embedding_provider:embedSetup.provider||'openai', embedding_model:embedSetup.model||'text-embedding-3-small', embedding_dimensions:embedSetup.dimensions||1536, embedding_endpoint:embedSetup.endpoint||'', embedding_send_dimensions:embedSetup.send_dimensions, embedding_batch_size:embedSetup.batch_size||20 };
+          await invoke('desktop_config_set',{cfg:draft});
+        }catch(e){}
+      } else if(!embedSetup.enabled){
+        try{
+          const cur=await invoke('desktop_config_get');
+          await invoke('desktop_config_set',{cfg:{...cur, embedding_enabled:false}});
+        }catch(e){}
+      }
+      const serverPort=+$('f-server').value||9190, neo4jPort=+$('f-neo').value||7687, redisPort=+$('f-redis').value||6379;
+      const useRedis=$('f-usered').checked, localUser=$('f-user').value.trim()||'me';
+      $('ce-steps').style.display='block';
       markStep('install','active');
       if(!st.installed){ setLog('ce-log','Installing CE server…'); await invoke('ce_install'); }
       markStep('install','done'); markStep('db','active'); setLog('ce-log','Starting Neo4j + Redis in Docker (first run may pull images)…');
-      await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis });
+      const databaseResult=await invoke('docker_up',{ neo4jPort, redisPort, neo4jPassword:pass, useRedis, timeoutMs:900000 });
       markStep('db','done'); markStep('config','active');
-      if(!st.configured){ setLog('ce-log','Writing config…');
-        await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true }); }
+      setLog('ce-log','Writing config…');
+      await invoke('ce_configure',{ serverPort, neo4jPort, neo4jPassword:pass, redisPort: useRedis?redisPort:null, localUser, localEmail: localUser+'@self-hosted', eulaAccepted:true });
+      configPending=true;
       markStep('config','done'); markStep('start','active'); setLog('ce-log','Starting the server, waiting for it to answer on 9190…');
-      await invoke('ce_start');
-      const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable), 40000);
-      if(!up){ setLog('ce-log','Server did not answer on 9190 within 40s — check Docker/Neo4j, then use Start again.',true); return; }
-      markStep('start','done'); await adoptCE();
+      const outcome=await KumihoDesktopCeSetup.completeCeSetupStart({
+        invoke, databaseResult, stopCeAndWait,
+        waitForReady:()=>waitFor(ceReady,40000),
+      });
+      configPending=outcome.configPending; cleanupBlocked=outcome.cleanupBlocked;
+      if(!outcome.ok){ failureMessage=outcome.message; setLog('ce-log',failureMessage,true); return; }
+      markStep('start','done'); completed=await adoptCE();
     }catch(e){ setLog('ce-log',String(e),true); }
+    finally{
+      if(configPending&&!cleanupBlocked){
+        try{await invoke('ce_configure_rollback'); configPending=false;
+          if(failureMessage) setLog('ce-log',failureMessage+'\nPrevious config was restored during cleanup.',true);}
+        catch(e){setLog('ce-log',(failureMessage?failureMessage+'\n':'')+'Setup failed and the previous config could not be restored: '+String(e),true);}
+      }
+      CE_STARTING=false; if(!completed){ button.disabled=false; button.textContent=idleLabel; }
+    }
   }
   async function setupCloud(){
     const token=$('c-token').value.trim(); if(!token){ setLog('cloud-log','Paste a service token, or get one on the web.',true); return; }
@@ -430,7 +580,7 @@
     else setLog('cloud-log','Token saved — cloud check unavailable ('+(r.error||('HTTP '+r.status))+'). Continuing…');
     try{
       const cur=await invoke('desktop_config_get').catch(()=>({}));
-      await invoke('desktop_config_set',{ cfg:{ ...cur, configured:true, mode:'cloud', server_port:9190, neo4j_port:7687, redis_port:6379, use_redis:false, local_user:'' } });
+      await invoke('desktop_config_set',{ cfg:{ ...cur, configured:true, mode:'cloud', server_port:9190, neo4j_port:7687, redis_port:6379, use_redis:false, local_user:'', embedding_enabled:false } });
       MODE='cloud'; setTimeout(enterApp,900);
     }catch(e){ setLog('cloud-log',String(e),true); }
   }
@@ -462,8 +612,14 @@
   function setSettingsDirty(dirty=true){ SETTINGS_DIRTY=dirty; $('settings-unsaved').classList.toggle('show',dirty); $('settings-save').disabled=!dirty||APPLYING_SETTINGS; }
   function readSettingsDraft(){
     if(!SETTINGS_DRAFT) return null;
-    SETTINGS_DRAFT={...SETTINGS_DRAFT,mode:$('settings-mode').value,server_port:+$('s-server').value||0,neo4j_port:+$('s-neo').value||0,
-      redis_port:+$('s-redis').value||0,use_redis:$('s-use-redis').checked,local_user:$('s-user').value.trim(),autostart_infra:$('cb-infra').checked};
+    const embedEnabled=!!$('s-embed-enabled')?.checked;
+    const embedSendRaw=$('s-embed-send-dims')?.value||'auto';
+    SETTINGS_DRAFT={...SETTINGS_DRAFT,mode:$('settings-mode').value,server_port:+$('s-server').value||0,
+      neo4j_port:+$('s-neo').value||0,
+      redis_port:+$('s-redis').value||0,use_redis:$('s-use-redis').checked,local_user:$('s-user').value.trim(),autostart_infra:$('cb-infra').checked,
+      embedding_enabled: embedEnabled, embedding_provider: $('s-embed-provider')?.value||'openai', embedding_model: $('s-embed-model')?.value?.trim()||'text-embedding-3-small',
+      embedding_dimensions: +$('s-embed-dims')?.value||1536, embedding_endpoint: $('s-embed-endpoint')?.value?.trim()||'',
+      embedding_send_dimensions: (embedSendRaw==='auto'?null:embedSendRaw==='true'), embedding_batch_size: +$('s-embed-batch')?.value||20 };
     SETTINGS_LOGIN_DRAFT=$('cb-login').checked;
     return SETTINGS_DRAFT;
   }
@@ -477,25 +633,109 @@
     $('settings-save-copy').textContent=mode==='ce'
       ? 'Save to use local Community Edition infrastructure.'
       : 'Save to connect Memory and 9miho to Kumiho Cloud.';
-    if(mode==='ce') refreshRun(); else refreshAccount();
+    if(mode==='ce'){ refreshRun(); refreshEmbeddingStatus(); } else refreshAccount();
   }
+  // embedding settings helpers
+  function initSettingsEmbeddingPresets(){
+    const sel=$('s-embed-preset'); if(!sel || sel.options.length) return;
+    KumihoDesktopEmbedding.PRESETS.forEach((p,i)=>{
+      const o=document.createElement('option'); o.value=String(i); o.textContent=p.label; sel.appendChild(o);
+    });
+  }
+  function toggleSettingsEmbedding(){
+    const on=!!$('s-embed-enabled')?.checked;
+    $('s-embed-fields').style.display=on?'block':'none';
+    if(on) initSettingsEmbeddingPresets();
+    refreshEmbeddingStatus();
+    markSettingsDirty();
+  }
+  function applySettingsPreset(){
+    const idx=+$('s-embed-preset').value||0;
+    const preset=KumihoDesktopEmbedding.PRESETS[idx];
+    if(!preset) return;
+    const fields={ provider:$('s-embed-provider'), model:$('s-embed-model'), dimensions:$('s-embed-dims'), endpoint:$('s-embed-endpoint'), sendDimensions:$('s-embed-send-dims'), batchSize:$('s-embed-batch') };
+    KumihoDesktopEmbedding.applyPresetToFields(preset, fields);
+    markSettingsDirty();
+  }
+  async function refreshEmbeddingStatus(){
+    try{
+      const st=await invoke('embedding_status');
+      const pill=$('embed-pill');
+      if(!pill) return;
+      if(!st.embedding_enabled){ pill.textContent='disabled'; pill.className='pill off'; }
+      else if(!st.has_key){ pill.textContent='no key'; pill.className='pill off'; }
+      else if(!st.enabled){ pill.textContent='not ready'; pill.className='pill off'; }
+      else { pill.textContent='enabled · '+st.model; pill.className='pill on'; }
+      const txt=$('embed-status-text');
+      if(txt){
+        if(st.error) txt.textContent=st.error;
+        else if(st.without_embedding!=null && st.total_revisions!=null) txt.textContent=st.without_embedding>0 ? (st.without_embedding+' without embedding · '+st.with_embedding+' embedded / '+st.total_revisions+' total') : ('all '+st.total_revisions+' revisions embedded');
+        else if(st.enabled) txt.textContent='Vector search ready — new memories will be embedded.';
+        else txt.textContent='';
+      }
+      const backfillBtn=$('embed-backfill-btn'), rebuildBtn=$('embed-rebuild-btn');
+      const canBackfill = st.enabled && (st.without_embedding==null || st.without_embedding>0);
+      if(backfillBtn) backfillBtn.disabled=!canBackfill;
+      if(rebuildBtn) rebuildBtn.disabled=!st.embedding_enabled;
+    }catch(e){}
+  }
+  async function backfillEmbeddings(){
+    const btn=$('embed-backfill-btn'); if(btn) btn.disabled=true; setLog('general','Backfilling embeddings… this may take a while.');
+    try{
+      const batch=+$('s-embed-batch')?.value||20;
+      const r=await invoke('embedding_backfill',{batchSize: batch});
+      setLog('general','✓ Backfill complete: '+r.embedded+' embedded / '+r.total+' total'+(r.errors?' ('+r.errors+' errors)':'')+'. '+(r.message||'')); toast('Backfill: '+r.embedded+'/'+r.total); refreshEmbeddingStatus();
+    }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ if(btn) btn.disabled=false; refreshEmbeddingStatus(); }
+  }
+  async function rebuildVectorIndex(){
+    if(!confirm('Rebuild the vector index? This is required when you change the embedding model or dimensions. Existing embeddings will be kept but may be re-indexed; run Backfill afterwards to re-embed.')) return;
+    const btn=$('embed-rebuild-btn'); if(btn) btn.disabled=true; setLog('general','Rebuilding vector index…');
+    try{
+      const r=await invoke('embedding_rebuild_index');
+      setLog('general','✓ '+(r||'Vector index rebuilt. Run Backfill to re-embed existing memories.')); toast('Vector index rebuilt');
+    }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ if(btn) btn.disabled=false; refreshEmbeddingStatus(); }
+  }
+
   async function reloadSettingsDraft(){
-    try{ SETTINGS_DRAFT=await invoke('desktop_config_get'); }catch(e){ SETTINGS_DRAFT={mode:MODE,server_port:9190,neo4j_port:7687,redis_port:6379,use_redis:true,local_user:'',autostart_infra:false}; }
-    SETTINGS_DRAFT={...SETTINGS_DRAFT,mode:SETTINGS_DRAFT.mode||MODE};
+    try{ SETTINGS_DRAFT=await invoke('desktop_config_get'); }catch(e){ SETTINGS_DRAFT={mode:MODE,server_port:9190,neo4j_port:7687,redis_port:6379,use_redis:true,local_user:'',autostart_infra:false,embedding_enabled:false,embedding_provider:'openai',embedding_model:'text-embedding-3-small',embedding_dimensions:1536,embedding_endpoint:'',embedding_send_dimensions:null,embedding_batch_size:20}; }
+    SETTINGS_DRAFT={...SETTINGS_DRAFT,mode:SETTINGS_DRAFT.mode||MODE, embedding_enabled:!!SETTINGS_DRAFT.embedding_enabled, embedding_provider:SETTINGS_DRAFT.embedding_provider||'openai', embedding_model:SETTINGS_DRAFT.embedding_model||'text-embedding-3-small', embedding_dimensions:SETTINGS_DRAFT.embedding_dimensions||1536, embedding_endpoint:SETTINGS_DRAFT.embedding_endpoint||'', embedding_batch_size:SETTINGS_DRAFT.embedding_batch_size||20};
     try{ SETTINGS_LOGIN_DRAFT=await invoke('autostart_get'); }catch(e){ SETTINGS_LOGIN_DRAFT=false; }
     $('settings-mode').value=SETTINGS_DRAFT.mode;
     $('s-server').value=SETTINGS_DRAFT.server_port||9190; $('s-neo').value=SETTINGS_DRAFT.neo4j_port||7687; $('s-redis').value=SETTINGS_DRAFT.redis_port||6379;
     $('s-user').value=SETTINGS_DRAFT.local_user||''; $('s-use-redis').checked=!!SETTINGS_DRAFT.use_redis; $('cb-infra').checked=!!SETTINGS_DRAFT.autostart_infra; $('cb-login').checked=SETTINGS_LOGIN_DRAFT;
+    $('s-embed-enabled').checked=!!SETTINGS_DRAFT.embedding_enabled;
+    $('s-embed-provider').value=SETTINGS_DRAFT.embedding_provider||'openai';
+    $('s-embed-model').value=SETTINGS_DRAFT.embedding_model||'text-embedding-3-small';
+    $('s-embed-dims').value=String(SETTINGS_DRAFT.embedding_dimensions||1536);
+    $('s-embed-endpoint').value=SETTINGS_DRAFT.embedding_endpoint||'';
+    const sd=SETTINGS_DRAFT.embedding_send_dimensions;
+    $('s-embed-send-dims').value=(sd==null?'auto':(sd?'true':'false'));
+    $('s-embed-batch').value=String(SETTINGS_DRAFT.embedding_batch_size||20);
+    $('s-embed-key').value='';
+    $('s-embed-fields').style.display=SETTINGS_DRAFT.embedding_enabled?'block':'none';
+    initSettingsEmbeddingPresets();
     $('a-token').value=''; $('ce-address').textContent='127.0.0.1:'+(SETTINGS_DRAFT.server_port||9190);
-    setSettingsDirty(false); renderSettingsMode();
+    setSettingsDirty(false); renderSettingsMode(); refreshEmbeddingStatus();
   }
   function validPort(value){ return Number.isInteger(value)&&value>=1&&value<=65535; }
   async function applySettings(){
     const draft=readSettingsDraft(); if(!draft||APPLYING_SETTINGS) return;
     const logId=draft.mode==='ce'?'general':'account';
     if(draft.mode==='ce' && (![draft.server_port,draft.neo4j_port,draft.redis_port].every(validPort))){ setLog(logId,'Ports must be whole numbers from 1 to 65535.',true); return; }
+    if(draft.mode==='ce' && draft.embedding_enabled){
+      const enteredKey=$('s-embed-key').value.trim();
+      let hasStoredKey=false;
+      if(!enteredKey){
+        hasStoredKey=await invoke('embedding_key_status').then(st=>st.has_key).catch(()=>false);
+      }
+      const embedCfg={ enabled:true, provider:draft.embedding_provider, model:draft.embedding_model, dimensions:draft.embedding_dimensions, endpoint:draft.embedding_endpoint, send_dimensions:draft.embedding_send_dimensions, api_key:enteredKey||(hasStoredKey?'stored':''), batch_size:draft.embedding_batch_size };
+      const err=KumihoDesktopEmbedding.validateEmbeddingConfig(embedCfg);
+      if(err){ setLog('general',err,true); return; }
+    }
     APPLYING_SETTINGS=true; $('settings-save').disabled=true; $('settings-save').textContent='Saving…';
-    let previousConfig=null, previousLogin=false, previousToken=null, persistenceStarted=false;
+    let previousConfig=null, previousLogin=false, previousToken=null, previousEmbedKey=null, embedKeyChanged=false, embedChanged=false, persistenceStarted=false;
     try{
       previousConfig=await invoke('desktop_config_get');
       previousLogin=await invoke('autostart_get');
@@ -512,11 +752,45 @@
         persistenceStarted=true;
         if(enteredToken) await invoke('account_set_token',{token:enteredToken});
       }
+      if(draft.mode==='ce'){
+        const enteredEmbedKey=$('s-embed-key').value.trim();
+        if(enteredEmbedKey){
+          // Capture the key we are replacing so rollback can put it back. Only
+          // this branch touches the vault, so only this branch may undo it.
+          previousEmbedKey=await invoke('embedding_key_get');
+          await invoke('embedding_key_set',{apiKey:enteredEmbedKey});
+          embedKeyChanged=true;
+        } else if(!draft.embedding_enabled){
+          // keep key for later re-enable; do not clear
+        } else {
+          const hasKey=await invoke('embedding_key_status').then(s=>s.has_key).catch(()=>false);
+          if(!hasKey) throw new Error('Embedding API key is required when vector search is enabled.');
+        }
+        // Detect embedding config change that requires CE restart.
+        embedChanged = !!previousConfig && (
+          previousConfig.embedding_enabled !== draft.embedding_enabled ||
+          previousConfig.embedding_provider !== draft.embedding_provider ||
+          previousConfig.embedding_model !== draft.embedding_model ||
+          previousConfig.embedding_dimensions !== draft.embedding_dimensions ||
+          previousConfig.embedding_endpoint !== draft.embedding_endpoint ||
+          String(previousConfig.embedding_send_dimensions) !== String(draft.embedding_send_dimensions)
+        );
+      }
       persistenceStarted=true;
       await invoke('desktop_config_set',{cfg:{...draft,configured:true}});
       await invoke('autostart_set',{enabled:SETTINGS_LOGIN_DRAFT});
       MODE=draft.mode; invalidateServerHealth(); $('brand-sub').textContent=MODE==='ce'?'Community Edition · local':'Kumiho Cloud';
-      $('a-token').value=''; setSettingsDirty(false); setLog(logId,'✓ Settings saved. Reconnecting applications…');
+      $('a-token').value=''; $('s-embed-key').value=''; setSettingsDirty(false); setLog(logId,'✓ Settings saved. Reconnecting applications…');
+      if(draft.mode==='ce' && embedChanged){
+        try{
+          const st=await invoke('ce_status');
+          if(st.reachable || st.managed){
+            setLog('general','Embedding config changed — restarting Community Edition to apply…');
+            await ceRestart();
+            if(draft.embedding_enabled) refreshEmbeddingStatus();
+          }
+        }catch(e){ setLog('general','Settings saved, but CE restart failed: '+String(e),true); }
+      }
       const mihoReconnected=await restartMihoIfRunning();
       const memoryReconnected=await startBrain();
       if(mihoReconnected&&memoryReconnected){
@@ -526,13 +800,14 @@
         setLog(logId,'Settings saved, but '+failed+' could not reconnect. Use Settings > Apps to retry.',true);
         toast('Settings saved; '+failed+' needs attention',true);
       }
-      refreshStatus(); refreshApps();
+      refreshStatus(); refreshApps(); if(draft.mode==='ce') refreshEmbeddingStatus();
     }catch(e){
       const rollbackErrors=[];
       if(persistenceStarted){
         try{ if(previousConfig)await invoke('desktop_config_set',{cfg:previousConfig}); }catch(rollback){ rollbackErrors.push('config: '+String(rollback)); }
         try{ await invoke('autostart_set',{enabled:previousLogin}); }catch(rollback){ rollbackErrors.push('startup: '+String(rollback)); }
         try{ if(previousToken)await invoke('account_set_token',{token:previousToken}); else await invoke('account_clear_token'); }catch(rollback){ rollbackErrors.push('token: '+String(rollback)); }
+        try{ if(embedKeyChanged){ if(previousEmbedKey) await invoke('embedding_key_set',{apiKey:previousEmbedKey}); else await invoke('embedding_key_clear'); } }catch(rollback){ rollbackErrors.push('embedding key: '+String(rollback)); }
       }
       invalidateServerHealth();
       const message=String(e)+(rollbackErrors.length?' Rollback needs attention ('+rollbackErrors.join('; ')+').':'');
@@ -577,7 +852,7 @@
         if(!cloudReachable) reason=probe.status===401||probe.status===403?'rejected-token':'unreachable';
       }
     }else{
-      ceReachable=!!(await invoke('ce_status')).reachable;
+      ceReachable=await ceReady();
       if(!ceReachable) reason='stopped';
     }
     const reachable=KumihoDesktopStatus.activeServerReachable(mode,ceReachable,cloudReachable);
@@ -617,16 +892,17 @@
     }catch(e){}
     try{ const r=await invoke('revka_status');
       if(refreshIsCurrent()){
-        $('dot-revka').className='dot '+(r.reachable?'on':'off');
-        $('revka-empty').classList.toggle('hide', r.reachable);
+        const visiblyReachable=r.reachable&&!r.stale;
+        $('dot-revka').className='dot '+(visiblyReachable?'on':'off');
+        $('revka-empty').classList.toggle('hide', visiblyReachable);
         const button=$('revka-install-btn'), copy=$('revka-empty-copy');
         if(button){
-          button.style.display=r.reachable?'none':'inline-flex';
+          button.style.display=visiblyReachable?'none':'inline-flex';
           const updateReady=r.stale||!!(REVKA_UPDATE?.update_available);
           button.textContent=!r.installed?'Install Revka':(updateReady?'Update & start Revka':'Start Revka');
-          if(!r.reachable) copy.textContent=!r.installed
+          if(!visiblyReachable) copy.textContent=!r.installed
             ? 'Installs the prebuilt runtime from official Revka releases (checksum-verified), then opens onboarding right here.'
-            : (updateReady?'A newer Revka release is ready to install.':'Revka is installed and ready to start.');
+            : (r.stale?'The running Revka build does not match the installed runtime. Update or reinstall it before opening the dashboard.':(updateReady?'A newer Revka release is ready to install.':'Revka is installed and ready to start.'));
         }
       }
     }catch(e){}
@@ -650,6 +926,9 @@
           : ((m.update_available||MIHO_UPDATE?.update_available)?'A newer 9miho release is ready to install.':(m.installed?'9miho is installed and ready to start.':'Install the runtime; no GitHub login or source toolchain is required.'));
       }
     }catch(e){}
+    if(refreshIsCurrent() && $('settings').classList.contains('show') && $('s-general').classList.contains('active') && $('settings-mode').value==='ce'){
+      try{ const ce=await invoke('ce_status'); if(refreshIsCurrent()) renderCeRuntimeStatus(ce); }catch(e){}
+    }
     if(refreshIsCurrent() && $('s-apps').classList.contains('active')) await refreshApps(mihoStatus,refreshGeneration);
     })();
     STATUS_REFRESH_IN_FLIGHT=refreshPromise;
@@ -664,38 +943,101 @@
   const CE_LATEST_URL='https://api.github.com/repos/KumihoIO/kumiho-server-community/releases/latest';
   async function ceLatestVersion(){ try{ const r=await fetch(CE_LATEST_URL); if(!r.ok) return null;
     const j=await r.json(); return String(j.tag_name||'').replace(/^v/,'')||null; }catch(e){ return null; } }
-  async function ceUpdate(){ setLog('general','updating the CE server…');
-    try{ await invoke('ce_stop'); }catch(e){}
-    try{ await invoke('ce_install'); await invoke('ce_start');
-      const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable), 40000);
-      setLog('general', up?'✓ CE updated and running':'installed — but the server did not answer; try Start'); }
-    catch(e){ setLog('general',String(e),true); }
-    refreshRun(); }
+  async function ceUpdate(){ if(!beginCeAction('update'))return; setLog('general','updating the CE server…');
+    try{ await stopCeAndWait(); await invoke('ce_install'); const {up}=await startCeAndWait();
+      if(up){ setLog('general','✓ CE updated and running'); toast('Community Edition updated'); }
+      else setLog('general','CE was installed, but the server did not answer; try Start.',true); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(); } }
 
-  async function refreshRun(){
-    try{ const ce=await invoke('ce_status'); pill($('ce-pill'),ce.reachable, ce.reachable?('v'+(ce.version||'?')):(ce.installed?'stopped':'not installed'));
-      $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
+  async function refreshRun(){ return refreshRunWithOptions(true); }
+  async function refreshRunLocal(){ return refreshRunWithOptions(false); }
+  async function refreshRunWithOptions(checkLatest){
+    try{ const ce=await invoke('ce_status'); renderCeRuntimeStatus(ce);
       const box=$('ce-update');
-      if(box){ const latest=await ceLatestVersion();
+      if(box && checkLatest){ const latest=await ceLatestVersion();
         if(!latest) box.innerHTML='';
-        else if(ce.version && ce.version!==latest) box.innerHTML=`<span class="pill accent">update available · v${latest}</span> <button class="sm primary" onclick="ceUpdate()">Update CE</button>`;
+        else if(ce.version && ce.version!==latest) box.innerHTML=`<span class="pill accent">update available · v${latest}</span> <button id="ce-update-btn" class="sm primary" onclick="ceUpdate()">Update CE</button>`;
         else box.innerHTML=`<span class="faint">CE is up to date (v${latest})</span>`; }
+      updateCeControlButtons(ce.reachable);
     }catch(e){}
     try{ const d=await invoke('docker_status'); $('docker-pill').textContent=d.available?'docker ok':'no docker'; $('docker-pill').className='pill '+(d.available?'on':'off');
       $('db-lines').innerHTML=`<span class="pill ${d.neo4j?'on':'off'}">Neo4j</span> <span class="pill ${d.redis?'on':'off'}">Redis</span>`; }catch(e){}
     refreshStartup();
   }
   async function refreshStartup(){ /* General loads startup values into its draft in reloadSettingsDraft(). */ }
-  async function ceRestart(){ setLog('general','restarting…'); try{await invoke('ce_stop');}catch(e){} setTimeout(()=>cmd('ce_start','general'),900); }
-  async function dbUp(){ const c=await invoke('desktop_config_get'); setLog('general','starting databases…');
-    const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis});
-    try{ const r=await go(''); setLog('general', r||'✓ databases up'); }
-    catch(e){ const msg=String(e);
-      if(/password/i.test(msg)){ const pass=prompt('Neo4j password (needed to create the database):');
-        if(!pass){ setLog('general','cancelled'); refreshRun(); return; }
-        try{ const r=await go(pass); setLog('general', r||'✓ databases up'); }catch(e2){ setLog('general',String(e2),true); } }
-      else { setLog('general',msg,true); } }
-    refreshRun(); }
+  function renderCeRuntimeStatus(ce){
+    const manualRecovery=ce.stoppable===false && (ce.reachable||ce.managed);
+    pill($('ce-pill'),ce.reachable,ce.reachable?('v'+(ce.version||'?')+(manualRecovery?' · manual stop required':'')):(ce.managed?(manualRecovery?'manual stop / recovery required':'starting / recovery needed'):(ce.installed?'stopped':'not installed')));
+    $('ce-ver').textContent=ce.mode?('· '+ce.mode):'';
+    updateCeControlButtons(ce.reachable,ce.managed,ce.stoppable);
+  }
+  function updateCeControlButtons(reachable=CE_LAST_REACHABLE,managed=CE_LAST_MANAGED,stoppable=CE_LAST_STOPPABLE){
+    CE_LAST_REACHABLE=!!reachable;
+    CE_LAST_MANAGED=!!managed;
+    CE_LAST_STOPPABLE=stoppable!==false;
+    const manualRecovery=!CE_LAST_STOPPABLE&&(CE_LAST_REACHABLE||CE_LAST_MANAGED);
+    const state=KumihoDesktopCeSetup.ceControlState(CE_LAST_REACHABLE,CE_STARTING,CE_LAST_MANAGED,CE_LAST_STOPPABLE);
+    const start=$('ce-start-btn'), restart=$('ce-restart-btn'), stop=$('ce-stop-btn'), update=$('ce-update-btn'), dbStart=$('db-start-btn'), dbStop=$('db-stop-btn');
+    if(start){ start.disabled=state.startDisabled; start.textContent=CE_ACTION==='start'?'Starting…':'Start'; start.setAttribute('aria-busy',String(CE_ACTION==='start')); }
+    if(restart){ restart.disabled=state.restartDisabled; restart.textContent=CE_ACTION==='restart'?'Restarting…':'Restart server'; restart.title=manualRecovery?'Stop the server manually before restarting.':''; restart.setAttribute('aria-busy',String(CE_ACTION==='restart')); }
+    if(stop){ stop.disabled=state.stopDisabled; stop.textContent=CE_ACTION==='stop'?(manualRecovery?'Checking…':'Stopping…'):(manualRecovery?'Manual stop / recovery steps':'Stop'); stop.title=manualRecovery?'Inspect the recorded process and show safe manual recovery steps.':''; stop.setAttribute('aria-busy',String(CE_ACTION==='stop')); }
+    if(update){ update.disabled=CE_STARTING||manualRecovery; update.textContent=CE_ACTION==='update'?'Updating…':'Update CE'; update.title=manualRecovery?'Stop the server manually before updating.':''; update.setAttribute('aria-busy',String(CE_ACTION==='update')); }
+    if(dbStart){ dbStart.disabled=CE_STARTING; dbStart.textContent=CE_ACTION==='db-start'?'Starting…':'Start databases'; dbStart.setAttribute('aria-busy',String(CE_ACTION==='db-start')); }
+    if(dbStop){ dbStop.disabled=CE_STARTING; dbStop.textContent=CE_ACTION==='db-stop'?'Stopping…':'Stop databases'; dbStop.setAttribute('aria-busy',String(CE_ACTION==='db-stop')); }
+  }
+  function beginCeAction(action){ if(CE_STARTING)return false; CE_STARTING=true; CE_ACTION=action; updateCeControlButtons(); return true; }
+  async function finishCeAction(checkLatest=true){ CE_STARTING=false; CE_ACTION=''; await (checkLatest?refreshRun():refreshRunLocal()); refreshStatus(); }
+  async function ceReady(){ try{ return KumihoDesktopCeSetup.ceHealthReady(await invoke('ce_health')); }catch(e){ return false; } }
+  async function startCeAndWait(){
+    const current=await invoke('ce_status');
+    if(current.reachable){ const up=await ceReady(); return {up,result:up?'Community Edition is already running':'Community Edition is running, but Neo4j is not ready'}; }
+    return KumihoDesktopCeSetup.startCeRuntime({
+      invoke, stopCeAndWait, waitForReady:()=>waitFor(ceReady,40000),
+    });
+  }
+  async function stopCeAndWait(force=false){
+    const current=await invoke('ce_status');
+    if(!current.reachable&&!current.managed&&!force) return false;
+    await invoke('ce_stop',{force});
+    const down=await waitFor(()=>invoke('ce_status').then(s=>!s.reachable),10000);
+    if(!down) throw new Error('Community Edition did not stop within 10 seconds. It was not restarted.');
+    return true;
+  }
+  async function ceStart(){ if(!beginCeAction('start'))return; setLog('general','starting Community Edition…');
+    try{ const {up,result}=await startCeAndWait();
+      if(up){ setLog('general',result||'✓ Community Edition started'); toast('Community Edition started'); }
+      else setLog('general','Server did not answer within 40s — check Neo4j and try again.',true); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(); } }
+  async function ceStop(){ if(!beginCeAction('stop'))return; setLog('general','stopping Community Edition…');
+    try{ const stopped=await stopCeAndWait(); setLog('general',stopped?'✓ Community Edition stopped':'Community Edition is already stopped'); toast('Community Edition stopped'); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(); } }
+  async function ceRestart(){ if(!beginCeAction('restart'))return; setLog('general','restarting Community Edition…');
+    try{ await stopCeAndWait(); const {up,result}=await startCeAndWait();
+      if(up){ setLog('general',result||'✓ Community Edition restarted'); toast('Community Edition restarted'); }
+      else setLog('general','Server did not answer within 40s — check Neo4j and try again.',true); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(); } }
+  async function dbUp(){ if(!beginCeAction('db-start'))return; setLog('general','starting databases…');
+    try{ const c=await invoke('desktop_config_get');
+      const go=(pass)=>invoke('docker_up',{neo4jPort:c.neo4j_port,redisPort:c.redis_port,neo4jPassword:pass||'',useRedis:c.use_redis,timeoutMs:300000});
+      try{ const r=await go(''); setLog('general',r||'✓ databases up'); }
+      catch(e){ const msg=String(e);
+        if(!/password/i.test(msg)) throw e;
+        const pass=prompt('Neo4j password (needed to create the database):');
+        if(!pass){ setLog('general','cancelled'); return; }
+        const r=await go(pass); setLog('general',r||'✓ databases up'); }
+    }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(false); } }
+  async function dbDown(){ if(!beginCeAction('db-stop'))return; setLog('general','stopping databases…');
+    try{ const r=await invoke('docker_down'); const status=await invoke('docker_status');
+      const remaining=[status.neo4j&&'Neo4j',status.redis&&'Redis'].filter(Boolean);
+      if(remaining.length) throw new Error((r?r+'. ':'')+remaining.join(' and ')+' still appears to be running. No database data was removed; check Docker Desktop and retry.');
+      setLog('general',r||'✓ databases stopped'); toast(r||'Databases stopped');
+    }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ await finishCeAction(false); } }
 
   // The control plane sends no Access-Control-Allow-Origin for the app origin, so
   // a webview fetch is CORS-blocked and would falsely read as unreachable. Probe
@@ -938,7 +1280,11 @@
     return run;
   }
   async function startRevkaOnce(force){
-    if(force){ try{ await invoke('revka_stop'); }catch(e){} await new Promise(r=>setTimeout(r,350)); }
+    if(force){
+      try{ await invoke('revka_stop'); }
+      catch(e){ toast(String(e),true); return false; }
+      await new Promise(r=>setTimeout(r,350));
+    }
     toast(force?'restarting Revka…':'starting Revka…');
     try{ await invoke('revka_start'); }catch(e){ toast(String(e),true); return false; }
     const up=await waitFor(()=>invoke('revka_status').then(s=>s.reachable&&!s.stale),40000);
@@ -967,10 +1313,10 @@
     toast('installing Revka…');
     try{
       const result=await invoke('revka_install');
-      setLog('apps','✓ '+result);
       // revka_install restarts internally, but a failed restart is reported as
       // a success string — make sure the daemon is actually up either way.
-      await startRevka(false);
+      if(!await startRevka(false)) throw new Error('Revka was installed but did not restart');
+      setLog('apps','✓ '+result);
       if(!wasInstalled) await openOnboardTerminal();   // first install → straight into onboarding
     }catch(e){
       setLog('apps',String(e),true); toast(String(e),true);
@@ -1046,10 +1392,6 @@
     return up;
   }
 
-  // Bound a promise so a hung CLI (e.g. `docker start` against a daemon still
-  // warming up at login) can't stall startup forever.
-  const withTimeout=(p,ms)=>Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error('timed out')),ms))]);
-
   // On launch, optionally bring the local CE infra up (server + Docker DBs) before
   // Memory, so a hands-free start lands on a live graph, not an empty one. Only
   // in CE mode, only when the toggle is on, and only if CE isn't already reachable.
@@ -1062,16 +1404,25 @@
         let cfg={}; try{ cfg=await invoke('desktop_config_get'); }catch(e){}
         if(cfg.autostart_infra){
           let ce={reachable:false}; try{ ce=await invoke('ce_status'); }catch(e){}
-          if(!ce.reachable){
+          const ready=ce.reachable && await ceReady();
+          if(!ready && beginCeAction('boot')){
             toast('Starting Community Edition…');
-            // Best-effort and time-bounded. Empty password reuses the containers
-            // made during setup; if the Docker daemon is still coming up at login,
-            // these may fail — we don't block the app, we just poll for CE and, if
-            // it never answers, point the user at Settings → General.
-            try{ await withTimeout(invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis}), 25000); }catch(e){}
-            try{ await withTimeout(invoke('ce_start'), 15000); }catch(e){}
-            const up=await waitFor(()=>invoke('ce_status').then(s=>s.reachable).catch(()=>false), 45000);
-            if(!up) toast('Community Edition is still starting — open Settings → General if it doesn’t appear.', true);
+            // Empty password reuses the containers made during setup. Keep the
+            // native Docker operation and CE start serialized: Tauri invokes are
+            // not cancelled when a JavaScript timeout wins a Promise.race.
+            try{
+              if(ce.reachable) await stopCeAndWait();
+              const {up}=await KumihoDesktopCeSetup.startCeAutoboot({
+                startDatabases:async()=>{
+                  const slow=setTimeout(()=>toast('Docker setup is taking longer than expected. Community Edition will start after this step finishes.'),25000);
+                  try{ return await invoke('docker_up',{neo4jPort:cfg.neo4j_port,redisPort:cfg.redis_port,neo4jPassword:'',useRedis:cfg.use_redis,timeoutMs:30000}); }
+                  finally{ clearTimeout(slow); }
+                },
+                startServer:startCeAndWait,
+              });
+              if(!up) toast('Community Edition did not become ready — open Settings → General to inspect its current status and retry.', true);
+            } catch(e){ const message='Community Edition could not start automatically: '+String(e); setLog('general',message,true); toast(message,true); }
+            finally { await finishCeAction(false); }
           }
         }
       }
@@ -1192,7 +1543,7 @@
     try{
       const revka=await invoke('revka_status');
       if(isCurrent()){
-        pill($('revka-app-pill'),revka.reachable,revka.reachable?'running':(revka.installed?'stopped':'not installed'));
+        pill($('revka-app-pill'),revka.reachable&&!revka.stale,revka.stale?'restart required':(revka.reachable?'running':(revka.installed?'stopped':'not installed')));
         $('revka-version').textContent=revka.version
           ?'Version '+revka.version+(revka.stale?' installed · serving '+(revka.serving_version||'an older build'):'')
           :'Not installed';
