@@ -277,11 +277,6 @@
             <div class="row" style="font-size:13px" id="db-lines"></div>
             <div class="row"><button id="db-start-btn" onclick="dbUp()">Start databases</button><button id="db-stop-btn" onclick="dbDown()">Stop databases</button></div>
           </div>
-          <div class="card">
-            <div class="row"><div class="grow"><span class="b">Startup</span> <span class="faint">run Kumiho hands-free</span></div></div>
-            <label class="row" style="gap:8px;cursor:pointer;margin-top:8px"><input type="checkbox" id="cb-login" onchange="markSettingsDirty()"><span>Launch Kumiho Desktop when I sign in</span></label>
-            <label class="row" style="gap:8px;cursor:pointer;margin-top:6px"><input type="checkbox" id="cb-infra" onchange="markSettingsDirty()"><span>Start the CE server and databases automatically</span></label>
-          </div>
           <div class="card" id="ce-embed-settings">
             <div class="row"><div class="grow"><span class="b">Vector search</span> <span class="faint">optional · embeddings</span></div><span class="pill" id="embed-pill">…</span></div>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:10px"><input type="checkbox" id="s-embed-enabled" onchange="toggleSettingsEmbedding()"><span>Enable vector search (embeddings)</span></label>
@@ -304,6 +299,11 @@
               </div>
               <p class="dim" style="font-size:12px;margin:8px 0 0">API key is stored in your OS keychain. Leave blank to keep the existing key. Changing model or dimensions requires <b>Rebuild vector index</b> + <b>Backfill</b>.</p>
             </div>
+          </div>
+          <div class="card">
+            <div class="row"><div class="grow"><span class="b">Startup</span> <span class="faint">run Kumiho hands-free</span></div></div>
+            <label class="row" style="gap:8px;cursor:pointer;margin-top:8px"><input type="checkbox" id="cb-login" onchange="markSettingsDirty()"><span>Launch Kumiho Desktop when I sign in</span></label>
+            <label class="row" style="gap:8px;cursor:pointer;margin-top:6px"><input type="checkbox" id="cb-infra" onchange="markSettingsDirty()"><span>Start the CE server and databases automatically</span></label>
           </div>
           <div class="log" id="log-general" role="status" aria-live="polite" aria-atomic="true"></div>
         </div>

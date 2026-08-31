@@ -54,6 +54,13 @@ assert.match(ceSetupFailureMessage('', '', 'Neo4j already serving 7687 — reusi
 assert.match(ceSetupFailureMessage('', '', '', true), /did not become ready within 40s/i);
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'desktop-ui', 'index.html'), 'utf8');
+const databasesCard = html.indexOf('<span class="b">Databases</span>');
+const vectorSearchCard = html.indexOf('<span class="b">Vector search</span>');
+const startupCard = html.indexOf('<span class="b">Startup</span>');
+assert.ok(
+  databasesCard >= 0 && databasesCard < vectorSearchCard && vectorSearchCard < startupCard,
+  'General settings should place Vector search between Databases and Startup',
+);
 const ceSetupSource = fs.readFileSync(path.join(__dirname, '..', 'desktop-ui', 'ce-setup.js'), 'utf8');
 const dockerSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'docker.rs'), 'utf8');
 const mainSource = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'main.rs'), 'utf8');
