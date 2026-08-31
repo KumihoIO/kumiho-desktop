@@ -13,6 +13,7 @@ mod docker;
 mod embedding;
 mod memory;
 mod miho;
+mod process_tree;
 mod pty;
 mod revka;
 mod run;
@@ -38,11 +39,13 @@ pub struct AppState {
     /// Held across 9miho's check-then-spawn so two UI paths cannot both decide
     /// the port is free and each launch a runtime.
     pub miho_start: Mutex<()>,
-    pub revka: Mutex<Option<std::process::Child>>,
+    pub revka: Mutex<Option<revka::TrackedRevka>>,
     /// Same serialization for Revka's stop / swap / spawn.
     pub revka_start: Mutex<()>,
     /// The embedded onboarding terminal, when one is open.
     pub revka_pty: Mutex<Option<pty::PtySession>>,
+    /// Serializes stop/open/spawn/register for onboarding PTY replacement.
+    pub revka_pty_start: Mutex<()>,
 }
 
 fn main() {

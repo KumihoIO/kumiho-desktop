@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -29,6 +29,13 @@ const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const STOP_GRACE: Duration = Duration::from_secs(8);
 /// The same, on the app-quit path — quitting must not visibly hang.
 const EXIT_GRACE: Duration = Duration::from_secs(3);
+const STARTUP_DEADLINE: Duration = Duration::from_secs(90);
+
+pub struct TrackedRevka {
+    child: std::process::Child,
+    started_at: std::time::Instant,
+    process_tree: crate::process_tree::ProcessTree,
+}
 
 #[derive(Deserialize)]
 struct GhAsset {
@@ -736,11 +743,19 @@ fn is_stale(installed: Option<&str>, reachable: bool, serving: Option<&str>) -> 
     }
 }
 
-fn wait_for_port_closed(timeout: Duration) -> bool {
+fn address_is_bindable(addr: SocketAddr) -> bool {
+    TcpListener::bind(addr).is_ok()
+}
+
+fn port_is_bindable() -> bool {
+    address_is_bindable(([127, 0, 0, 1], REVKA_PORT).into())
+}
+
+fn wait_for_port_bindable(timeout: Duration) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], REVKA_PORT).into();
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_err() {
+        if address_is_bindable(addr) {
             return true;
         }
         if std::time::Instant::now() >= deadline {
@@ -766,20 +781,21 @@ fn validated_runtime_stamp() -> Result<Option<RuntimeStamp>, String> {
 }
 
 fn terminate_tracked(
-    process: &Mutex<Option<std::process::Child>>,
+    process: &Mutex<Option<TrackedRevka>>,
     grace: Duration,
 ) -> Result<bool, String> {
-    let child = process.lock().map_err(|e| e.to_string())?.take();
-    let Some(mut child) = child else {
+    let tracked = process.lock().map_err(|e| e.to_string())?.take();
+    let Some(mut tracked) = tracked else {
         return Ok(false);
     };
+    let child = &mut tracked.child;
     #[cfg(windows)]
     {
         let _ = grace;
-        // Child keeps the Windows process handle, so this cannot hit a PID
-        // reuse replacement the way a later `taskkill /PID` subprocess could.
+        // A Job Object ties every MCP sidecar to the retained root handle.
+        // This avoids both PID-reuse signalling and inherited socket leaks.
         if child.try_wait().map_err(|e| e.to_string())?.is_none() {
-            child.kill().map_err(|e| e.to_string())?;
+            tracked.process_tree.terminate()?;
         }
     }
     #[cfg(unix)]
@@ -820,7 +836,7 @@ fn terminate_tracked(
 fn stop_revka(state: &AppState) -> Result<(), String> {
     let stopped_tracked = terminate_tracked(&state.revka, STOP_GRACE)?;
     if stopped_tracked {
-        if wait_for_port_closed(Duration::from_secs(3)) {
+        if wait_for_port_bindable(Duration::from_secs(3)) {
             clear_runtime_stamp();
             return Ok(());
         }
@@ -835,7 +851,7 @@ fn stop_revka(state: &AppState) -> Result<(), String> {
             stamp.pid
         )),
         Ok(None) => {
-            if wait_for_port_closed(Duration::from_millis(400)) {
+            if wait_for_port_bindable(Duration::from_millis(400)) {
                 clear_runtime_stamp();
                 Ok(())
             } else {
@@ -845,7 +861,7 @@ fn stop_revka(state: &AppState) -> Result<(), String> {
             }
         }
         Err(error) => {
-            if wait_for_port_closed(Duration::from_millis(400)) {
+            if wait_for_port_bindable(Duration::from_millis(400)) {
                 clear_runtime_stamp();
                 Ok(())
             } else {
@@ -875,14 +891,32 @@ fn start_revka(state: &AppState) -> Result<String, String> {
         return Ok("Revka already serving on 42617".into());
     }
 
-    {
+    let startup_timed_out = {
         let mut tracked = state.revka.lock().map_err(|e| e.to_string())?;
-        match tracked.as_mut().map(std::process::Child::try_wait) {
-            Some(Ok(None)) if !reachable => return Ok("Revka is already starting on 42617".into()),
-            Some(Ok(None)) => {}
-            Some(_) => *tracked = None,
-            None => {}
+        match tracked.as_mut() {
+            Some(process) => match process.child.try_wait() {
+                Ok(None) if !reachable && process.started_at.elapsed() < STARTUP_DEADLINE => {
+                    return Ok("Revka is already starting on 42617".into());
+                }
+                Ok(None) if !reachable => true,
+                Ok(None) => false,
+                _ => {
+                    *tracked = None;
+                    false
+                }
+            },
+            None => false,
         }
+    };
+    if startup_timed_out {
+        let _ = terminate_tracked(&state.revka, EXIT_GRACE);
+        if wait_for_port_bindable(Duration::from_secs(3)) {
+            clear_runtime_stamp();
+        }
+        return Err(
+            "Revka stayed alive but its dashboard did not become ready within 90 seconds; the owned process tree was stopped — see ~/.kumiho/apps/revka/logs/revka.log"
+                .into(),
+        );
     }
 
     if reachable {
@@ -891,7 +925,7 @@ fn start_revka(state: &AppState) -> Result<String, String> {
         // A prior Desktop may have exited while its daemon was still starting.
         // A validated cross-session process is reported for manual recovery;
         // a legacy/corrupt record is discarded only while the port is free.
-        if !wait_for_port_closed(Duration::from_millis(400)) {
+        if !wait_for_port_bindable(Duration::from_millis(400)) {
             return Err(
                 "127.0.0.1:42617 is occupied, but the saved Revka process record cannot be verified; stop that specific process manually and try again".into(),
             );
@@ -903,9 +937,11 @@ fn start_revka(state: &AppState) -> Result<String, String> {
         }
     }
 
-    let addr: SocketAddr = ([127, 0, 0, 1], REVKA_PORT).into();
-    if TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok() {
-        return Err("port 42617 is occupied by a process that is not Revka".into());
+    if !port_is_bindable() {
+        return Err(
+            "port 42617 is occupied by another process; stop that specific process and try Revka again"
+                .into(),
+        );
     }
     let binary = installed_binary().ok_or("Revka is not installed yet")?;
     let root = install_root().ok_or("no home directory")?;
@@ -919,7 +955,9 @@ fn start_revka(state: &AppState) -> Result<String, String> {
         .map_err(|e| e.to_string())?;
     let stderr = stdout.try_clone().map_err(|e| e.to_string())?;
 
-    let child = command(binary.to_str().ok_or("invalid Revka install path")?)
+    let process_tree = crate::process_tree::ProcessTree::new()?;
+    let mut daemon = command(binary.to_str().ok_or("invalid Revka install path")?);
+    daemon
         .args([
             "daemon",
             "--host",
@@ -929,17 +967,82 @@ fn start_revka(state: &AppState) -> Result<String, String> {
         ])
         .current_dir(&root)
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let mut child = child;
-    if let Err(error) = write_runtime_stamp(child.id(), &installed_version().unwrap_or_default()) {
+        .stderr(Stdio::from(stderr));
+    // Windows creates the root suspended, assigns it to the Job Object, and
+    // resumes it only after the runtime stamp is safe. No sidecar can escape
+    // through the spawn-before-assignment race.
+    process_tree.prepare_std_command(&mut daemon);
+    let mut child = daemon.spawn().map_err(|e| e.to_string())?;
+    if let Err(error) = process_tree.assign_std_child(&child) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(error);
     }
-    *state.revka.lock().map_err(|e| e.to_string())? = Some(child);
+    if let Err(error) = write_runtime_stamp(child.id(), &installed_version().unwrap_or_default()) {
+        let _ = process_tree.terminate();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if let Err(error) = process_tree.resume_std_child(&child) {
+        clear_runtime_stamp();
+        let _ = process_tree.terminate();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    *state.revka.lock().map_err(|e| e.to_string())? = Some(TrackedRevka {
+        child,
+        started_at: std::time::Instant::now(),
+        process_tree,
+    });
     Ok(format!("Revka starting on {REVKA_PORT}"))
+}
+
+fn schedule_startup_watchdog(app: tauri::AppHandle, pid: u32) {
+    std::thread::spawn(move || {
+        std::thread::sleep(STARTUP_DEADLINE);
+        if health_probe() {
+            return;
+        }
+        let state = app.state::<AppState>();
+        let Ok(_lifecycle) = lifecycle_lock(&state) else {
+            return;
+        };
+        // Recheck after taking the lifecycle lock: readiness or a replacement
+        // start may have won while this watchdog waited.
+        if health_probe() {
+            return;
+        }
+        let same_start = state
+            .revka
+            .lock()
+            .ok()
+            .and_then(|tracked| tracked.as_ref().map(|process| process.child.id()))
+            == Some(pid);
+        if same_start && matches!(terminate_tracked(&state.revka, EXIT_GRACE), Ok(true)) {
+            clear_runtime_stamp();
+            let _ = wait_for_port_bindable(Duration::from_secs(3));
+        }
+    });
+}
+
+fn schedule_watchdog_for_new_start(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    result: &str,
+) -> Result<(), String> {
+    if result.starts_with("Revka starting") {
+        let pid = state
+            .revka
+            .lock()
+            .map_err(|e| e.to_string())?
+            .as_ref()
+            .map(|process| process.child.id())
+            .ok_or("Revka start lost its tracked process")?;
+        schedule_startup_watchdog(app.clone(), pid);
+    }
+    Ok(())
 }
 
 /// App shutdown: retire the daemon we own so it does not hold the binary lock
@@ -1011,7 +1114,7 @@ pub fn revka_check_update() -> Result<RevkaUpdateInfo, String> {
 /// checksums, swap it in, and bring the daemon back up. Used for both first
 /// installs and updates — there is no bundled payload to distinguish.
 #[tauri::command]
-pub fn revka_install(state: State<AppState>) -> Result<String, String> {
+pub fn revka_install(handle: tauri::AppHandle, state: State<AppState>) -> Result<String, String> {
     let app: &AppState = &state;
     // Fetch, download, verify, and extract with NO locks held: a slow or
     // failed download must never cost the user their running daemon (the
@@ -1037,7 +1140,10 @@ pub fn revka_install(state: State<AppState>) -> Result<String, String> {
         replace_runtime(&root, &staged_binary, &latest_version)?;
         Ok(if onboarding_complete() {
             match start_revka(app) {
-                Ok(_) => format!("Revka {latest_version} installed and restarted"),
+                Ok(result) => {
+                    schedule_watchdog_for_new_start(&handle, app, &result)?;
+                    format!("Revka {latest_version} installed and restarted")
+                }
                 Err(error) => {
                     format!("Revka {latest_version} installed, but it did not restart: {error}")
                 }
@@ -1053,9 +1159,11 @@ pub fn revka_install(state: State<AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn revka_start(state: State<AppState>) -> Result<String, String> {
+pub fn revka_start(app: tauri::AppHandle, state: State<AppState>) -> Result<String, String> {
     let _lifecycle = lifecycle_lock(&state)?;
-    start_revka(&state)
+    let result = start_revka(&state)?;
+    schedule_watchdog_for_new_start(&app, &state, &result)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1104,18 +1212,17 @@ pub struct OnboardStarted {
     pub shell: String,
 }
 
-/// Open the embedded onboarding terminal with Revka itself as the PTY child.
-/// The wizard is fully interactive and its actual process exit reaches the UI.
+/// Open the embedded onboarding terminal in the platform's user shell.
+/// The shell exits with the wizard, so its actual process result reaches UI.
 #[tauri::command]
 pub fn revka_onboard_start(
     state: State<AppState>,
     on_data: tauri::ipc::Channel<crate::pty::PtyEvent>,
 ) -> Result<OnboardStarted, String> {
+    let _start = state.revka_pty_start.lock().map_err(|e| e.to_string())?;
     let binary = installed_binary().ok_or("Revka is not installed yet")?;
-    crate::pty::spawn_command_session(&state, &binary, &["onboard"], on_data)?;
-    Ok(OnboardStarted {
-        shell: "Revka CLI".into(),
-    })
+    let shell = crate::pty::spawn_command_session(&state, &binary, on_data)?;
+    Ok(OnboardStarted { shell })
 }
 
 #[tauri::command]
@@ -1138,12 +1245,13 @@ mod tests {
     #[cfg(not(windows))]
     use super::extract_binary;
     use super::{
-        checksum_for, health_response_ok, installed_version_at, is_stale, newer_version_available,
-        onboarding_artifacts_complete_at, parse_pairing_response, parse_release,
-        release_asset_name, replace_runtime, require_full_onboarding_at, runtime_identity_matches,
-        tag_version, validate_pairing_http,
+        address_is_bindable, checksum_for, health_response_ok, installed_version_at, is_stale,
+        newer_version_available, onboarding_artifacts_complete_at, parse_pairing_response,
+        parse_release, release_asset_name, replace_runtime, require_full_onboarding_at,
+        runtime_identity_matches, tag_version, validate_pairing_http,
     };
     use std::fs;
+    use std::net::TcpListener;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_release(asset: &str) -> String {
@@ -1153,6 +1261,15 @@ mod tests {
                 {{"name":"{asset}","browser_download_url":"https://github.com/KumihoIO/Revka/releases/download/v2026.6.30/{asset}"}},
                 {{"name":"SHA256SUMS","browser_download_url":"https://github.com/KumihoIO/Revka/releases/download/v2026.6.30/SHA256SUMS"}}]}}"#
         )
+    }
+
+    #[test]
+    fn bind_probe_detects_a_listener_even_when_application_health_is_unknown() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert!(!address_is_bindable(addr));
+        drop(listener);
+        assert!(address_is_bindable(addr));
     }
 
     #[test]

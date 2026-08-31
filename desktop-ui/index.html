@@ -1307,7 +1307,10 @@
     }
     toast(force?'restarting Revka…':'starting Revka…');
     try{ await invoke('revka_start'); }catch(e){ toast(String(e),true); return false; }
-    const up=await waitFor(()=>invoke('revka_status').then(s=>s.onboarded&&s.reachable&&!s.stale),40000);
+    // Revka may spend tens of seconds connecting MCP sidecars on a cold start.
+    // The backend owns a 90s watchdog that retires the same process tree if the
+    // gateway never becomes healthy; wait just beyond it for a truthful result.
+    const up=await waitFor(()=>invoke('revka_status').then(s=>s.onboarded&&s.reachable&&!s.stale),95000);
     if(up){ if(loadDashboard) loadRevka(); $('revka-empty').classList.add('hide'); }
     else toast('Revka did not start on 42617 — see ~/.kumiho/apps/revka/logs/revka.log',true);
     refreshStatus();
@@ -1323,7 +1326,7 @@
       else startRevka(false);
     }).catch(()=>installOrUpdateRevka());
   }
-  async function installOrUpdateRevka(){
+  async function installOrUpdateRevka(openOnboardAfterInstall=true){
     const button=$('revka-install-btn'), appButton=$('revka-app-install'); if(button) button.disabled=true; if(appButton) appButton.disabled=true;
     let wasInstalled=false;
     try{ wasInstalled=(await invoke('revka_status')).installed; }catch(e){}
@@ -1336,8 +1339,11 @@
       const result=await invoke('revka_install');
       setLog('apps','✓ '+result);
       const status=await invoke('revka_status');
-      if(!status.onboarded) await openOnboardTerminal();
-      else if((status.stale||!status.reachable) && !await startRevka(status.reachable)) throw new Error('Revka was installed but did not restart');
+      if(!status.onboarded){
+        if(openOnboardAfterInstall) await openOnboardTerminal();
+      }else if((status.stale||!status.reachable) && !await startRevka(status.reachable)){
+        throw new Error('Revka was installed but did not restart');
+      }
     }catch(e){
       setLog('apps',String(e),true); toast(String(e),true);
     }
@@ -1456,7 +1462,29 @@
   }
 
   // ---------- embedded onboarding terminal (xterm.js + native PTY) ----------
-  let TERM=null, TERM_FIT=null, PTY_OPEN=false, TERM_GEN=0, TERM_TAIL='', TERM_AUTO_SKIPPED=false, REVKA_ONBOARD_FINISHING=false, TERM_RETURN_FOCUS=null;
+  let TERM=null, TERM_FIT=null, PTY_OPEN=false, PTY_READY=false, PTY_CHANNEL=null, TERM_WATCHDOG=null, TERM_GEN=0, TERM_TAIL='', TERM_AUTO_SKIPPED=false, TERM_PENDING_AUTO_RESPONSE=false, TERM_CLEANUP_FAILED=false, REVKA_ONBOARD_FINISHING=false, REVKA_ONBOARD_OPENING=null, TERM_CLOSING=false, TERM_RETURN_FOCUS=null;
+  const TERM_REPORTED_ERRORS=new Set();
+  function reportTermIoError(kind,label,error,myGen=TERM_GEN){
+    if(myGen!==TERM_GEN || TERM_REPORTED_ERRORS.has(kind)) return;
+    TERM_REPORTED_ERRORS.add(kind);
+    const message=label+': '+String(error);
+    try{ TERM?.writeln('\r\n\x1b[31m'+message+'\x1b[0m'); }catch(renderError){}
+    $('term-hint').textContent=message;
+    toast(message,true);
+  }
+  function sendPtyInput(data,kind='input',label='Could not send input to Revka',myGen=TERM_GEN){
+    if(myGen!==TERM_GEN || !PTY_OPEN || TERM_CLOSING) return false;
+    if(!PTY_READY){
+      if(kind==='auto-response') TERM_PENDING_AUTO_RESPONSE=true;
+      return false;
+    }
+    invoke('revka_pty_write',{data}).catch(error=>reportTermIoError(kind,label,error,myGen));
+    return true;
+  }
+  function sendPtyResize(cols,rows,myGen=TERM_GEN){
+    if(myGen!==TERM_GEN || !PTY_OPEN || !PTY_READY || TERM_CLOSING) return;
+    invoke('revka_pty_resize',{cols,rows}).catch(error=>reportTermIoError('resize','Could not resize the Revka terminal',error,myGen));
+  }
   function initTerm(){
     if(TERM){ TERM_FIT.fit(); return; }
     TERM=new window.Terminal({
@@ -1467,48 +1495,112 @@
     TERM_FIT=new window.FitAddon.FitAddon();
     TERM.loadAddon(TERM_FIT);
     TERM.open($('term-host'));
-    TERM.onData(data=>invoke('revka_pty_write',{data}).catch(()=>{}));
-    TERM.onResize(({cols,rows})=>invoke('revka_pty_resize',{cols,rows}).catch(()=>{}));
+    TERM.onData(data=>sendPtyInput(data));
+    TERM.onResize(({cols,rows})=>sendPtyResize(cols,rows));
     new ResizeObserver(()=>{ try{ TERM_FIT.fit(); }catch(e){} }).observe($('term-host'));
   }
-  async function openOnboardTerminal(){
+  function openOnboardTerminal(){
+    if(REVKA_ONBOARD_OPENING) return REVKA_ONBOARD_OPENING;
+    if(PTY_OPEN || TERM_CLEANUP_FAILED || REVKA_ONBOARD_FINISHING){
+      $('onboard-term').classList.add('show');
+      requestAnimationFrame(()=>{ try{ TERM?.focus(); }catch(e){} });
+      return Promise.resolve(true);
+    }
+    const run=openOnboardTerminalOnce();
+    REVKA_ONBOARD_OPENING=run;
+    const clear=()=>{ if(REVKA_ONBOARD_OPENING===run) REVKA_ONBOARD_OPENING=null; };
+    run.then(clear,clear);
+    return run;
+  }
+  async function openOnboardTerminalOnce(){
     let status; try{ status=await invoke('revka_status'); }catch(e){ toast(String(e),true); return; }
-    if(!status.installed){ await installOrUpdateRevka(); return; }
+    if(!status.installed){
+      // Stay in this single-flight run. Letting the installer call the public
+      // opener here would make it await the same promise that is awaiting it.
+      await installOrUpdateRevka(false);
+      try{ status=await invoke('revka_status'); }catch(e){ toast(String(e),true); return; }
+      if(!status.installed || status.onboarded) return;
+    }
     if(!$('onboard-term').classList.contains('show')) TERM_RETURN_FOCUS=document.activeElement;
     $('onboard-term').classList.add('show');
-    initTerm();
-    try{ TERM.reset(); }catch(e){}   // fresh scrollback per wizard run
     const myGen=++TERM_GEN;
-    TERM_TAIL=''; TERM_AUTO_SKIPPED=false; REVKA_ONBOARD_FINISHING=false;
+    TERM_TAIL=''; TERM_AUTO_SKIPPED=false; TERM_CLEANUP_FAILED=false; REVKA_ONBOARD_FINISHING=false;
     // Optimistic and synchronous: closeOnboardTerminal must always see a live
     // flag while a session might exist, or the shell leaks past the modal.
-    PTY_OPEN=true;
+    PTY_OPEN=true; PTY_READY=false;
+    TERM_PENDING_AUTO_RESPONSE=false;
+    TERM_REPORTED_ERRORS.clear();
     $('term-shell').textContent='· starting Revka CLI…';
     $('term-hint').textContent='Complete the wizard here. If Revka finds an existing config, choose Full onboarding. At the final “Start Revka now?” step, Desktop will choose No, start the managed daemon itself, and issue your dashboard pairing code.';
-    const channel=new T.ipc.Channel();
-    channel.onmessage=async(message)=>{
-      if(myGen!==TERM_GEN) return;   // superseded session — ignore its stream
-      if(message.type==='exit'){ PTY_OPEN=false; await finishRevkaOnboarding(myGen,!!message.success); return; }
-      TERM.write(message.data);
-      TERM_TAIL=(TERM_TAIL+message.data).replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g,'').slice(-3000);
-      if(!TERM_AUTO_SKIPPED && TERM_TAIL.includes('Start Revka now? (web dashboard + channels)')){
-        TERM_AUTO_SKIPPED=true;
-        invoke('revka_pty_write',{data:'n\r'}).catch(()=>{});
-      }
-    };
     try{
+      initTerm();
+      TERM.reset();   // fresh scrollback per wizard run
+      TERM.writeln('\x1b[2m[starting the platform terminal and Revka onboarding…]\x1b[0m');
+      // Tauri v2 exposes Channel from core. Keep it globally reachable for the
+      // whole PTY session so the webview cannot collect the stream bridge.
+      const channel=new T.core.Channel();
+      PTY_CHANNEL=channel;
+      channel.onmessage=async(message)=>{
+        if(myGen!==TERM_GEN || TERM_CLOSING) return;   // superseded or closing session
+        if(TERM_WATCHDOG){ clearTimeout(TERM_WATCHDOG); TERM_WATCHDOG=null; }
+        if(message.type==='exit'){
+          PTY_OPEN=false; PTY_READY=false; PTY_CHANNEL=null; TERM_PENDING_AUTO_RESPONSE=false;
+          if(message.cleanup_error){
+            TERM_CLEANUP_FAILED=true;
+            $('term-shell').textContent='· cleanup failed';
+            reportTermIoError('exit-cleanup','Could not safely clean up the Revka terminal',message.cleanup_error,myGen);
+            $('term-hint').textContent='Desktop disarmed the expired process-group reference for safety. Quit Desktop, stop any remaining Revka process manually, then reopen Desktop before retrying onboarding.';
+            return;
+          }
+          await finishRevkaOnboarding(myGen,!!message.success);
+          return;
+        }
+        TERM.write(message.data);
+        TERM_TAIL=(TERM_TAIL+message.data).replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g,'').slice(-3000);
+        if(!TERM_AUTO_SKIPPED && TERM_TAIL.includes('Start Revka now? (web dashboard + channels)')){
+          TERM_AUTO_SKIPPED=true;
+          sendPtyInput('n\r','auto-response','Could not answer Revka\'s final start prompt automatically',myGen);
+        }
+      };
+      TERM_WATCHDOG=setTimeout(()=>{
+        if(myGen!==TERM_GEN || !PTY_OPEN) return;
+        TERM.writeln('\r\n\x1b[33m[the terminal started, but Revka has not produced output yet]\x1b[0m');
+        $('term-hint').textContent='Revka is taking longer than expected. Wait a moment; if no prompt appears, close this window and retry. Any launch error will be shown here.';
+      },5000);
       const started=await invoke('revka_onboard_start',{onData:channel});
-      // The modal may have closed (or been reopened) while this was spawning.
-      if(!$('onboard-term').classList.contains('show')){ try{ await invoke('revka_pty_stop'); }catch(e){} }
-      if(myGen!==TERM_GEN || !$('onboard-term').classList.contains('show')) return;
+      // The modal may be closing, closed, or superseded while this was spawning.
+      if(TERM_CLOSING || myGen!==TERM_GEN || !$('onboard-term').classList.contains('show')){
+        try{ await invoke('revka_pty_stop'); }
+        catch(error){
+          const label='Could not stop the superseded Revka terminal';
+          if(myGen===TERM_GEN) reportTermIoError('abandoned-stop',label,error,myGen);
+          else toast(label+': '+String(error),true);
+        }
+        return;
+      }
+      // A very short-lived CLI can emit Exit before the start invocation's
+      // promise resumes. Do not mark that already-ended session ready again.
+      if(!PTY_OPEN) return;
+      PTY_READY=true;
       $('term-shell').textContent='· '+started.shell;
       TERM_FIT.fit();
+      sendPtyResize(TERM.cols,TERM.rows,myGen);
+      if(TERM_PENDING_AUTO_RESPONSE){
+        TERM_PENDING_AUTO_RESPONSE=false;
+        sendPtyInput('n\r','auto-response','Could not answer Revka\'s final start prompt automatically',myGen);
+      }
       requestAnimationFrame(()=>{ try{ TERM.focus(); }catch(e){} });
     }catch(e){
       if(myGen===TERM_GEN){
-        PTY_OPEN=false;
-        TERM.writeln('\x1b[31m'+String(e)+'\x1b[0m');
-        toast(String(e),true);
+        if(TERM_WATCHDOG){ clearTimeout(TERM_WATCHDOG); TERM_WATCHDOG=null; }
+        PTY_OPEN=false; PTY_READY=false; PTY_CHANNEL=null; TERM_PENDING_AUTO_RESPONSE=false; TERM_CLEANUP_FAILED=false;
+        const message=String(e);
+        try{ TERM?.writeln('\r\n\x1b[31m'+message+'\x1b[0m'); }
+        catch(renderError){ $('term-host').textContent=message; }
+        $('term-hint').textContent='The onboarding terminal could not start. Close this window and retry; the error above identifies the failed shell or PTY step.';
+        try{ await invoke('revka_pty_stop'); }
+        catch(stopError){ reportTermIoError('failed-start-stop','Could not clean up the failed Revka terminal',stopError,myGen); }
+        toast(message,true);
       }
     }
   }
@@ -1545,15 +1637,38 @@
     }finally{ REVKA_ONBOARD_FINISHING=false; }
   }
   async function closeOnboardTerminal(){
+    if(TERM_CLOSING) return false;
+    TERM_CLOSING=true;
     const returnFocus=TERM_RETURN_FOCUS;
-    TERM_RETURN_FOCUS=null;
-    $('onboard-term').classList.remove('show');
-    TERM_GEN++;
-    PTY_OPEN=false;
-    // Unconditional: the backend no-ops when nothing is running, but skipping
-    // the call on a stale flag would leave the wizard alive invisibly.
-    try{ await invoke('revka_pty_stop'); }catch(e){}
-    requestAnimationFrame(()=>{ try{ returnFocus?.focus(); }catch(e){} });
+    const closeButton=$('term-close');
+    if(closeButton) closeButton.disabled=true;
+    PTY_READY=false;
+    if(TERM_WATCHDOG){ clearTimeout(TERM_WATCHDOG); TERM_WATCHDOG=null; }
+    $('term-shell').textContent='· stopping…';
+    try{
+      // Unconditional: the backend no-ops when nothing is running. Keep the
+      // modal visible until it confirms the session has stopped.
+      await invoke('revka_pty_stop');
+      TERM_GEN++;
+      PTY_OPEN=false; PTY_READY=false; PTY_CHANNEL=null; TERM_PENDING_AUTO_RESPONSE=false; TERM_CLEANUP_FAILED=false;
+      TERM_RETURN_FOCUS=null;
+      $('onboard-term').classList.remove('show');
+      requestAnimationFrame(()=>{ try{ returnFocus?.focus(); }catch(e){} });
+      return true;
+    }catch(error){
+      PTY_READY=PTY_OPEN&&!TERM_CLEANUP_FAILED;
+      const message='Could not stop the Revka onboarding terminal: '+String(error);
+      try{ TERM?.writeln('\r\n\x1b[31m'+message+'\x1b[0m'); }catch(renderError){}
+      $('term-shell').textContent='· stop failed';
+      $('term-hint').textContent=TERM_CLEANUP_FAILED
+        ?'Desktop cannot safely retry this expired process-group reference. Quit Desktop, stop any remaining Revka process manually, then reopen Desktop.'
+        :'The terminal is still open because Desktop could not confirm that Revka stopped. Retry closing it; the error above has been preserved.';
+      toast(message,true);
+      return false;
+    }finally{
+      TERM_CLOSING=false;
+      if(closeButton) closeButton.disabled=false;
+    }
   }
 
   // Keep keyboard focus inside whichever Revka setup dialog is visible. This

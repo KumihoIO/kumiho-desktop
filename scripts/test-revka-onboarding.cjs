@@ -42,13 +42,50 @@ async function main() {
   assert.match(backend, /fn onboarding_complete\(\)[\s\S]*onboarding_artifacts_complete\(\)/);
   assert.match(backend, /fn start_revka\([\s\S]*if !onboarding_complete\(\)[\s\S]*run onboarding/i);
 
-// Desktop owns the post-wizard daemon lifecycle. The CLI runs directly in the
-// PTY so its exit is observable; an interactive shell would stay alive.
+// Desktop owns the post-wizard daemon lifecycle. The PTY uses PowerShell on
+// Windows and the user's default shell on macOS/Linux, then makes that shell
+// exit with the Revka wizard's status so completion remains observable.
   assert.match(pty, /pub fn spawn_command_session\(/);
+  assert.match(pty, /REVKA_INTERACTIVE/);
+  assert.match(pty, /fn platform_shell\(/);
+  assert.match(pty, /pwsh(?:\.exe)?/i);
+  assert.match(pty, /powershell(?:\.exe)?/i);
+  assert.match(pty, /new_default_prog\(\)\.get_shell\(\)/);
+  assert.match(pty, /cmd\.env\("KUMIHO_REVKA_BIN", revka\.as_os_str\(\)\)/);
+  assert.match(pty, /exec \\"\$KUMIHO_REVKA_BIN\\" onboard/);
+  assert.match(pty, /exec \$env\.KUMIHO_REVKA_BIN onboard/);
+  assert.match(pty, /PathBuf::from\("\/bin\/sh"\)/);
+  assert.doesNotMatch(pty, /"revka onboard"/);
+  assert.match(pty, /args: vec!\["-c"\.into\(\), command\.into\(\)\]/);
+  assert.match(backend, /revka_pty_start\.lock\(\)/);
   assert.match(pty, /let exit_events = on_data\.clone\(\);[\s\S]*std::thread::spawn[\s\S]*child\.wait\(\)[\s\S]*PtyEvent::Exit/);
   assert.doesNotMatch(backend, /crate::pty::spawn_session\(&state, &binary/);
-  assert.match(ui, /message\.type==='exit'[\s\S]*finishRevkaOnboarding/);
+  assert.match(ui, /new T\.core\.Channel\(\)/);
+  assert.doesNotMatch(ui, /T\.ipc\.Channel/);
+  assert.match(ui, /function openOnboardTerminal\(\)\{[\s\S]*if\(REVKA_ONBOARD_OPENING\) return REVKA_ONBOARD_OPENING;[\s\S]*openOnboardTerminalOnce\(\)/);
+  assert.match(ui, /async function installOrUpdateRevka\(openOnboardAfterInstall=true\)/);
+  assert.match(ui, /if\(!status\.onboarded\)\{\s*if\(openOnboardAfterInstall\) await openOnboardTerminal\(\);\s*\}else if/);
+  assert.match(ui, /if\(!status\.installed\)\{[\s\S]*installOrUpdateRevka\(false\);[\s\S]*status=await invoke\('revka_status'\)/);
+  assert.match(ui, /if\(PTY_OPEN \|\| TERM_CLEANUP_FAILED \|\| REVKA_ONBOARD_FINISHING\)/);
+  assert.match(ui, /PTY_OPEN=true; PTY_READY=false;/);
+  assert.match(ui, /function sendPtyInput\([\s\S]*if\(!PTY_READY\)/);
+  assert.match(ui, /if\(myGen!==TERM_GEN \|\| !PTY_OPEN \|\| !PTY_READY \|\| TERM_CLOSING\) return;/);
+  assert.match(ui, /Could not send input to Revka/);
+  assert.match(ui, /Could not resize the Revka terminal/);
+  assert.match(ui, /Could not answer Revka\\'s final start prompt automatically/);
+  assert.match(ui, /message\.type==='exit'[\s\S]*message\.cleanup_error[\s\S]*finishRevkaOnboarding/);
   assert.match(ui, /Start Revka now\? \(web dashboard \+ channels\)/);
+
+  const closeStart = ui.indexOf('async function closeOnboardTerminal()');
+  const closeEnd = ui.indexOf('// Keep keyboard focus', closeStart);
+  const closeFlow = ui.slice(closeStart, closeEnd);
+  assert.ok(closeStart >= 0 && closeEnd > closeStart, 'close onboarding flow must exist');
+  assert.ok(
+    closeFlow.indexOf("await invoke('revka_pty_stop')") < closeFlow.indexOf("$('onboard-term').classList.remove('show')"),
+    'the modal must remain visible until PTY stop succeeds',
+  );
+  assert.match(closeFlow, /catch\(error\)\{[\s\S]*Could not stop the Revka onboarding terminal/);
+  assert.doesNotMatch(closeFlow, /revka_pty_stop'\);\s*\}catch\([^)]*\)\{\}/);
 
 // Pairing is issued natively over Revka's localhost-only admin contract before
 // the dashboard iframe loads. Never parse decorated CLI output for the code.
