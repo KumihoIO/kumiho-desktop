@@ -5,6 +5,17 @@ const ui = fs.readFileSync('desktop-ui/index.html', 'utf8');
 const backend = fs.readFileSync('src-tauri/src/revka.rs', 'utf8');
 const pty = fs.readFileSync('src-tauri/src/pty.rs', 'utf8');
 const processTree = fs.readFileSync('src-tauri/src/process_tree.rs', 'utf8');
+const revkaIcon = fs.readFileSync('desktop-ui/assets/revka-icon.png');
+
+assert.deepEqual(
+  revkaIcon.subarray(0, 8),
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  'the packaged Revka app icon must remain a PNG',
+);
+assert.match(
+  ui,
+  /<div class="app-icon"><img src="\.\/assets\/revka-icon\.png" alt=""><\/div><div class="grow"><div class="b">Revka<\/div>/,
+);
 
 assert.match(
   ui,
