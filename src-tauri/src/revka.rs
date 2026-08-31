@@ -234,19 +234,22 @@ fn extract_binary(archive_bytes: &[u8], staging: &Path) -> Result<PathBuf, Strin
             .entries()
             .map_err(|e| format!("invalid Revka archive: {e}"))?
             .filter_map(|entry| entry.ok())
-            .filter_map(|entry| entry.path().ok().map(Path::into_owned))
+            .filter_map(|entry| entry.path().ok().map(|path| path.into_owned()))
             .filter(|path| path.file_name().is_some_and(|name| name == binary_name()))
             .collect();
         candidates.sort_by_key(|path| (path.components().count(), path.to_string_lossy().len()));
         if let Some(entry_path) = candidates.first() {
-            let mut decoder = flate2::read::GzDecoder::new(archive_bytes);
-            let mut archive = tar::Archive::new(decoder.as_mut());
+            let decoder = flate2::read::GzDecoder::new(archive_bytes);
+            let mut archive = tar::Archive::new(decoder);
             for entry in archive
                 .entries()
                 .map_err(|e| format!("invalid Revka archive: {e}"))?
             {
                 let mut entry = entry.map_err(|e| e.to_string())?;
-                if entry.path().ok().map(Path::into_owned).as_deref() == Some(entry_path.as_path())
+                if entry
+                    .path()
+                    .ok()
+                    .is_some_and(|path| path.as_ref() == entry_path.as_path())
                 {
                     let destination = staging.join(binary_name());
                     let mut out = fs::File::create(&destination).map_err(|e| e.to_string())?;
@@ -1132,6 +1135,8 @@ pub fn revka_pty_stop(state: State<AppState>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
+    use super::extract_binary;
     use super::{
         checksum_for, health_response_ok, installed_version_at, is_stale, newer_version_available,
         onboarding_artifacts_complete_at, parse_pairing_response, parse_release,
@@ -1301,6 +1306,38 @@ mod tests {
         assert!(onboarding_artifacts_complete_at(&root, &workspace));
         assert!(require_full_onboarding_at(&root, &workspace).is_ok());
         fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_release_archive_extracts_the_revka_binary() {
+        use flate2::{write::GzEncoder, Compression};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kumiho-desktop-revka-archive-{}-{unique}",
+            std::process::id()
+        ));
+        let staging = root.join("staging");
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let payload = b"revka-test-binary";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "nested/revka", payload.as_slice())
+            .expect("append test binary");
+        let encoder = builder.into_inner().expect("finish tar archive");
+        let archive = encoder.finish().expect("finish gzip archive");
+
+        let extracted = extract_binary(&archive, &staging).expect("extract Revka binary");
+        assert_eq!(fs::read(extracted).expect("read extracted binary"), payload);
+        fs::remove_dir_all(root).expect("remove test archive");
     }
 
     #[test]
