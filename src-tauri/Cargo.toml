@@ -21,6 +21,7 @@ tauri-plugin-single-instance = "2"  # collapse a duplicate launch (updater relau
 tauri-plugin-autostart = "2"        # "launch at login" (Run key / LaunchAgent / .desktop)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"    # Revka: read its active_workspace.toml without guessing escaped paths
 semver = "1"
 dirs = "5"      # locate ~/.kumiho for the Run pillar
 ureq = "2"      # Account: probe the cloud control plane natively — a webview

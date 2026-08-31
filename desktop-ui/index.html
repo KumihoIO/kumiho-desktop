@@ -108,6 +108,9 @@
   .term-host{flex:1;min-height:0;padding:10px 14px;background:#050506;overflow:hidden;}
   .term-host .xterm,.term-host .xterm-viewport{max-height:100%;}
   .term-hint{padding:10px 20px;border-top:1px solid var(--line);font-size:12px;color:var(--faint);}
+  .modal.pair-modal{width:min(520px,92vw);padding:28px;box-shadow:0 28px 90px rgba(0,0,0,.58);}
+  .pair-code{margin:22px 0 10px;padding:18px;border:1px solid rgba(243,108,76,.45);border-radius:14px;background:rgba(239,76,40,.08);font:700 38px/1 var(--mono);letter-spacing:.28em;text-align:center;color:#fff;text-indent:.28em;}
+  .pair-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:20px}.pair-actions button{flex:1;min-width:130px}
   .toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:60;font-family:var(--mono);font-size:12px;
     background:#131316;border:1px solid var(--line);border-radius:10px;padding:9px 14px;color:var(--dim);opacity:0;transition:opacity .2s;pointer-events:none;}
   .toast.show{opacity:1;} .toast.bad{color:var(--bad);border-color:rgba(248,113,113,.35);}
@@ -336,7 +339,7 @@
             <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">Revka</div><div class="faint" id="revka-version">Version —</div></div><span class="pill" id="revka-app-pill">…</span></div>
             <div class="app-meta" id="revka-version-detail">Runtime · 127.0.0.1:42617</div>
             <div class="app-update-copy" id="revka-update-copy">Checks official prebuilt Revka releases (SHA-256 verified).</div>
-            <div class="app-actions"><button id="revka-check-btn" onclick="checkRevkaUpdate(true)">Check update</button><button class="primary" id="revka-app-install" onclick="installOrUpdateRevka()">Install</button><button onclick="startRevka(true)">Restart</button><button onclick="openOnboardTerminal()">Onboard</button></div>
+            <div class="app-actions"><button id="revka-check-btn" onclick="checkRevkaUpdate(true)">Check update</button><button class="primary" id="revka-app-install" onclick="installOrUpdateRevka()">Install</button><button onclick="startRevka(true)">Restart</button><button id="revka-onboard-btn" onclick="openOnboardTerminal()">Onboard</button><button id="revka-pair-btn" onclick="issueRevkaPairingCode()">Pair dashboard</button></div>
           </div>
           <div class="card app-card">
             <div class="row"><div class="app-icon"><img src="./assets/kumiho-fox.png" alt=""></div><div class="grow"><div class="b">9miho</div><div class="faint" id="miho-version">Version —</div></div><span class="pill" id="miho-app-pill">…</span></div>
@@ -377,10 +380,21 @@
         <div class="kicker">Revka onboarding</div>
         <h2 id="term-title" style="margin:2px 0 0;font-size:18px">Setup wizard <span class="faint mono" style="font-size:12px" id="term-shell"></span></h2>
       </div>
-      <button class="icon ghost" aria-label="Close onboarding terminal" onclick="closeOnboardTerminal()">✕</button>
+      <button class="icon ghost" id="term-close" aria-label="Close onboarding terminal" onclick="closeOnboardTerminal()">✕</button>
     </div>
     <div class="term-host" id="term-host"></div>
-    <div class="term-hint">The wizard runs in your shell inside Kumiho Desktop. Closing this dialog stops it — reopen Revka → Onboard any time.</div>
+    <div class="term-hint" id="term-hint">Complete the wizard here. If Revka finds an existing config, choose Full onboarding. At the final “Start Revka now?” step, Desktop will choose No, start the managed daemon itself, and issue your dashboard pairing code.</div>
+  </div>
+</div>
+
+<!-- ===================== REVKA PAIRING ===================== -->
+<div class="overlay" id="revka-pairing">
+  <div class="modal pair-modal" role="dialog" aria-modal="true" aria-labelledby="revka-pair-title">
+    <div class="mhead"><div class="grow"><div class="kicker">Revka setup · Dashboard</div><h2 id="revka-pair-title">Pair this dashboard</h2></div><button class="icon ghost" id="revka-pair-close" aria-label="Close pairing dialog" onclick="closeRevkaPairing()">✕</button></div>
+    <p class="dim" id="revka-pair-copy" style="margin:12px 0 0">Use this one-time code in the Revka dashboard. It stays only on this screen and is replaced when you request a new one.</p>
+    <div class="pair-code" id="revka-pair-code" aria-live="polite">••••••</div>
+    <div class="faint" id="revka-pair-note" style="font-size:12px;text-align:center">Copy it first; the dashboard will ask you to enter it.</div>
+    <div class="pair-actions"><button id="revka-copy-code" onclick="copyRevkaPairingCode()">Copy code</button><button id="revka-new-code" onclick="issueRevkaPairingCode(true)">New code</button><button class="primary" id="revka-open-dashboard" onclick="openRevkaDashboardAfterPairing()">Copy &amp; open dashboard</button></div>
   </div>
 </div>
 
@@ -389,6 +403,7 @@
 <script src="./server-health.js"></script>
 <script src="./ce-setup.js"></script>
 <script src="./embedding.js"></script>
+<script src="./revka-flow.js"></script>
 <script src="./assets/vendor/xterm.js"></script>
 <script src="./assets/vendor/addon-fit.js"></script>
 <script>
@@ -892,17 +907,18 @@
     }catch(e){}
     try{ const r=await invoke('revka_status');
       if(refreshIsCurrent()){
-        const visiblyReachable=r.reachable&&!r.stale;
+        const visiblyReachable=r.onboarded&&r.reachable&&!r.stale;
         $('dot-revka').className='dot '+(visiblyReachable?'on':'off');
         $('revka-empty').classList.toggle('hide', visiblyReachable);
         const button=$('revka-install-btn'), copy=$('revka-empty-copy');
         if(button){
           button.style.display=visiblyReachable?'none':'inline-flex';
           const updateReady=r.stale||!!(REVKA_UPDATE?.update_available);
-          button.textContent=!r.installed?'Install Revka':(updateReady?'Update & start Revka':'Start Revka');
-          if(!visiblyReachable) copy.textContent=!r.installed
-            ? 'Installs the prebuilt runtime from official Revka releases (checksum-verified), then opens onboarding right here.'
-            : (r.stale?'The running Revka build does not match the installed runtime. Update or reinstall it before opening the dashboard.':(updateReady?'A newer Revka release is ready to install.':'Revka is installed and ready to start.'));
+          const action=KumihoRevkaFlow.action(r,updateReady);
+          button.textContent=action==='install'?'Install Revka':(action==='update'?'Update & continue':(action==='onboard'?'Set up Revka':'Start Revka'));
+          if(!visiblyReachable) copy.textContent=action==='install'
+            ? 'Installs the checksum-verified Revka runtime, then opens its setup wizard here.'
+            : (action==='update'?'Update the runtime before continuing setup or opening the dashboard.':(action==='onboard'?'Revka is installed, but setup is not complete. Finish onboarding here to start the daemon and receive a dashboard pairing code.':'Revka setup is complete and the daemon is ready to start.'));
         }
       }
     }catch(e){}
@@ -1111,6 +1127,9 @@
   let MIHO_CHECK_ERROR=null;
   let MEMORY_STATUS=null;
   let REVKA_UPDATE=null;
+  let REVKA_PAIRING_CODE=null, REVKA_PAIRING_REQUIRED=false, REVKA_PAIRING_CODE_VALID=false;
+  let REVKA_PAIRING_GEN=0, REVKA_PAIRING_PENDING=false, REVKA_PAIRING_RETURN_FOCUS=null;
+  const REVKA_PAIRING_REQUEST_GATE=KumihoRevkaFlow.createRequestGate();
   function activateProductPane(name){
     ACTIVE_PRODUCT=name;
     localStorage.setItem('kumiho.activeProduct',name);
@@ -1127,6 +1146,7 @@
     if(name==='revka'){
       let status; try{ status=await invoke('revka_status'); }catch(e){ toast(String(e),true); return; }
       await refreshStatus();
+      if(!status.onboarded){ if(status.installed) await openOnboardTerminal(); return; }
       if(status.reachable&&!status.stale){ loadRevka(); return; }
       if(status.stale){ await startRevka(true); return; }
       // Same guard as 9miho: don't plain-start when an update is known — let
@@ -1270,16 +1290,16 @@
     }
   }
   let REVKA_START_IN_FLIGHT=null;
-  async function startRevka(force){
+  async function startRevka(force,loadDashboard=true){
     if(UPDATING) return false;
     // Same coalescing contract as 9miho: concurrent plain starts join; a forced
     // restart is a real user request and never joins an in-flight one.
     if(!force && REVKA_START_IN_FLIGHT) return REVKA_START_IN_FLIGHT;
-    const run=startRevkaOnce(force);
+    const run=startRevkaOnce(force,loadDashboard);
     if(!force){ REVKA_START_IN_FLIGHT=run; run.finally(()=>{ if(REVKA_START_IN_FLIGHT===run) REVKA_START_IN_FLIGHT=null; }); }
     return run;
   }
-  async function startRevkaOnce(force){
+  async function startRevkaOnce(force,loadDashboard=true){
     if(force){
       try{ await invoke('revka_stop'); }
       catch(e){ toast(String(e),true); return false; }
@@ -1287,8 +1307,8 @@
     }
     toast(force?'restarting Revka…':'starting Revka…');
     try{ await invoke('revka_start'); }catch(e){ toast(String(e),true); return false; }
-    const up=await waitFor(()=>invoke('revka_status').then(s=>s.reachable&&!s.stale),40000);
-    if(up){ loadRevka(); $('revka-empty').classList.add('hide'); }
+    const up=await waitFor(()=>invoke('revka_status').then(s=>s.onboarded&&s.reachable&&!s.stale),40000);
+    if(up){ if(loadDashboard) loadRevka(); $('revka-empty').classList.add('hide'); }
     else toast('Revka did not start on 42617 — see ~/.kumiho/apps/revka/logs/revka.log',true);
     refreshStatus();
     return up;
@@ -1299,6 +1319,7 @@
     invoke('revka_status').then(r=>{
       const updateReady=r.stale||!!(REVKA_UPDATE?.update_available);
       if(!r.installed || updateReady) installOrUpdateRevka();
+      else if(!r.onboarded) openOnboardTerminal();
       else startRevka(false);
     }).catch(()=>installOrUpdateRevka());
   }
@@ -1313,19 +1334,129 @@
     toast('installing Revka…');
     try{
       const result=await invoke('revka_install');
-      // revka_install restarts internally, but a failed restart is reported as
-      // a success string — make sure the daemon is actually up either way.
-      if(!await startRevka(false)) throw new Error('Revka was installed but did not restart');
       setLog('apps','✓ '+result);
-      if(!wasInstalled) await openOnboardTerminal();   // first install → straight into onboarding
+      const status=await invoke('revka_status');
+      if(!status.onboarded) await openOnboardTerminal();
+      else if((status.stale||!status.reachable) && !await startRevka(status.reachable)) throw new Error('Revka was installed but did not restart');
     }catch(e){
       setLog('apps',String(e),true); toast(String(e),true);
     }
     finally{ if(button) button.disabled=false; if(appButton) appButton.disabled=false; refreshStatus(); refreshApps(); }
   }
 
+  function setRevkaPairingPending(pending){
+    REVKA_PAIRING_PENDING=pending;
+    $('revka-copy-code').disabled=pending||!REVKA_PAIRING_CODE_VALID;
+    $('revka-new-code').disabled=pending;
+    $('revka-open-dashboard').disabled=pending||(REVKA_PAIRING_REQUIRED&&!REVKA_PAIRING_CODE_VALID);
+    const settingsButton=$('revka-pair-btn'); if(settingsButton && pending) settingsButton.disabled=true;
+  }
+  function invalidateRevkaPairingCode(){
+    REVKA_PAIRING_CODE=null;
+    REVKA_PAIRING_CODE_VALID=false;
+    $('revka-pair-code').textContent='••••••';
+    $('revka-pair-note').textContent='Issuing and verifying a new code…';
+  }
+  function renderRevkaPairing(info,returnFocus=null){
+    const required=!!info?.pairing_required, code=info?.pairing_code||null;
+    const overlay=$('revka-pairing');
+    if(!overlay.classList.contains('show')){
+      const active=returnFocus||document.activeElement;
+      REVKA_PAIRING_RETURN_FOCUS=active&&typeof active.focus==='function'&&!overlay.contains(active)?active:$('product-revka');
+    }
+    REVKA_PAIRING_REQUIRED=required;
+    REVKA_PAIRING_CODE=code;
+    REVKA_PAIRING_CODE_VALID=!required||!!code;
+    $('revka-pair-code').style.display=required?'block':'none';
+    $('revka-pair-code').textContent=code||'••••••';
+    $('revka-copy-code').style.display=required?'inline-flex':'none';
+    $('revka-new-code').style.display=required?'inline-flex':'none';
+    $('revka-pair-copy').textContent=required
+      ?'Use this one-time code in the Revka dashboard. It is kept only in memory and is replaced when you request a new one.'
+      :'Pairing is disabled for this local Revka gateway, so the dashboard can open directly.';
+    $('revka-pair-note').textContent=required?'Copy it first; the dashboard will ask you to enter it.':'No code is required.';
+    $('revka-open-dashboard').textContent=required?'Copy & open dashboard':'Open dashboard';
+    setRevkaPairingPending(REVKA_PAIRING_PENDING);
+    overlay.classList.add('show');
+    requestAnimationFrame(()=>$('revka-open-dashboard').focus());
+  }
+  function issueRevkaPairingCode(replace=false){
+    return REVKA_PAIRING_REQUEST_GATE.run(()=>issueRevkaPairingCodeOnce(replace));
+  }
+  async function issueRevkaPairingCodeOnce(replace=false){
+    const myGen=++REVKA_PAIRING_GEN;
+    setRevkaPairingPending(true);
+    try{
+      const status=await invoke('revka_status');
+      if(!status.onboarded){ await openOnboardTerminal(); return false; }
+      if((status.stale||!status.reachable) && !await startRevka(status.reachable,false)) return false;
+      if(replace) invalidateRevkaPairingCode();
+      const info=await invoke(replace?'revka_pairing_new':'revka_pairing_prepare');
+      if(myGen!==REVKA_PAIRING_GEN) return false;
+      renderRevkaPairing(info);
+      return true;
+    }catch(e){
+      if(replace&&myGen===REVKA_PAIRING_GEN){
+        try{
+          const recovered=await invoke('revka_pairing_prepare');
+          if(myGen===REVKA_PAIRING_GEN){ renderRevkaPairing(recovered); return true; }
+        }catch(recoveryError){}
+        $('revka-pair-note').textContent='The previous code may no longer be valid. Request a new code to continue.';
+      }
+      if(myGen===REVKA_PAIRING_GEN) toast('Could not issue a Revka pairing code: '+String(e),true);
+      return false;
+    }
+    finally{ setRevkaPairingPending(false); }
+  }
+  async function writeRevkaPairingCode(code){
+    try{ await navigator.clipboard.writeText(code); toast('Pairing code copied'); return true; }
+    catch(e){ toast('Could not copy the pairing code',true); return false; }
+  }
+  function copyRevkaPairingCode(){
+    return REVKA_PAIRING_REQUEST_GATE.run(copyRevkaPairingCodeOnce);
+  }
+  async function copyRevkaPairingCodeOnce(){
+    const myGen=REVKA_PAIRING_GEN, code=REVKA_PAIRING_CODE;
+    if(REVKA_PAIRING_REQUIRED&&(!REVKA_PAIRING_CODE_VALID||!code)) return false;
+    if(!code) return true;
+    setRevkaPairingPending(true);
+    try{
+      if(!await writeRevkaPairingCode(code)) return false;
+      return myGen===REVKA_PAIRING_GEN&&code===REVKA_PAIRING_CODE;
+    }finally{ setRevkaPairingPending(false); }
+  }
+  function openRevkaDashboardAfterPairing(){
+    return REVKA_PAIRING_REQUEST_GATE.run(openRevkaDashboardAfterPairingOnce);
+  }
+  async function openRevkaDashboardAfterPairingOnce(){
+    const myGen=REVKA_PAIRING_GEN, code=REVKA_PAIRING_CODE;
+    if(REVKA_PAIRING_REQUIRED&&(!REVKA_PAIRING_CODE_VALID||!code)) return false;
+    setRevkaPairingPending(true);
+    try{
+      if(code&&!await writeRevkaPairingCode(code)) return false;
+      if(myGen!==REVKA_PAIRING_GEN||code!==REVKA_PAIRING_CODE) return false;
+      closeRevkaPairing(false);
+      activateProductPane('revka');
+      loadRevka();
+      $('revka-empty').classList.add('hide');
+      requestAnimationFrame(()=>$('revka-frame').focus());
+      return true;
+    }finally{ setRevkaPairingPending(false); }
+  }
+  function closeRevkaPairing(restoreFocus=true){
+    const returnFocus=REVKA_PAIRING_RETURN_FOCUS;
+    $('revka-pairing').classList.remove('show');
+    REVKA_PAIRING_GEN++;
+    REVKA_PAIRING_CODE=null;
+    REVKA_PAIRING_REQUIRED=false;
+    REVKA_PAIRING_CODE_VALID=false;
+    REVKA_PAIRING_RETURN_FOCUS=null;
+    $('revka-pair-code').textContent='••••••';
+    if(restoreFocus) requestAnimationFrame(()=>{ try{ returnFocus?.focus(); }catch(e){} });
+  }
+
   // ---------- embedded onboarding terminal (xterm.js + native PTY) ----------
-  let TERM=null, TERM_FIT=null, PTY_OPEN=false, TERM_GEN=0;
+  let TERM=null, TERM_FIT=null, PTY_OPEN=false, TERM_GEN=0, TERM_TAIL='', TERM_AUTO_SKIPPED=false, REVKA_ONBOARD_FINISHING=false, TERM_RETURN_FOCUS=null;
   function initTerm(){
     if(TERM){ TERM_FIT.fit(); return; }
     TERM=new window.Terminal({
@@ -1341,19 +1472,29 @@
     new ResizeObserver(()=>{ try{ TERM_FIT.fit(); }catch(e){} }).observe($('term-host'));
   }
   async function openOnboardTerminal(){
+    let status; try{ status=await invoke('revka_status'); }catch(e){ toast(String(e),true); return; }
+    if(!status.installed){ await installOrUpdateRevka(); return; }
+    if(!$('onboard-term').classList.contains('show')) TERM_RETURN_FOCUS=document.activeElement;
     $('onboard-term').classList.add('show');
     initTerm();
     try{ TERM.reset(); }catch(e){}   // fresh scrollback per wizard run
     const myGen=++TERM_GEN;
+    TERM_TAIL=''; TERM_AUTO_SKIPPED=false; REVKA_ONBOARD_FINISHING=false;
     // Optimistic and synchronous: closeOnboardTerminal must always see a live
     // flag while a session might exist, or the shell leaks past the modal.
     PTY_OPEN=true;
-    $('term-shell').textContent='· starting shell…';
+    $('term-shell').textContent='· starting Revka CLI…';
+    $('term-hint').textContent='Complete the wizard here. If Revka finds an existing config, choose Full onboarding. At the final “Start Revka now?” step, Desktop will choose No, start the managed daemon itself, and issue your dashboard pairing code.';
     const channel=new T.ipc.Channel();
-    channel.onmessage=(message)=>{
+    channel.onmessage=async(message)=>{
       if(myGen!==TERM_GEN) return;   // superseded session — ignore its stream
-      if(message.type==='exit'){ PTY_OPEN=false; TERM.writeln('\r\n\x1b[2m[session ended]\x1b[0m'); return; }
+      if(message.type==='exit'){ PTY_OPEN=false; await finishRevkaOnboarding(myGen,!!message.success); return; }
       TERM.write(message.data);
+      TERM_TAIL=(TERM_TAIL+message.data).replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g,'').slice(-3000);
+      if(!TERM_AUTO_SKIPPED && TERM_TAIL.includes('Start Revka now? (web dashboard + channels)')){
+        TERM_AUTO_SKIPPED=true;
+        invoke('revka_pty_write',{data:'n\r'}).catch(()=>{});
+      }
     };
     try{
       const started=await invoke('revka_onboard_start',{onData:channel});
@@ -1362,6 +1503,7 @@
       if(myGen!==TERM_GEN || !$('onboard-term').classList.contains('show')) return;
       $('term-shell').textContent='· '+started.shell;
       TERM_FIT.fit();
+      requestAnimationFrame(()=>{ try{ TERM.focus(); }catch(e){} });
     }catch(e){
       if(myGen===TERM_GEN){
         PTY_OPEN=false;
@@ -1370,13 +1512,70 @@
       }
     }
   }
+  async function finishRevkaOnboarding(myGen,success){
+    if(myGen!==TERM_GEN || REVKA_ONBOARD_FINISHING) return;
+    if(!success){
+      TERM.writeln('\r\n\x1b[31m[onboarding did not complete — review the message above and retry]\x1b[0m');
+      $('term-hint').textContent='Setup was cancelled or failed. Close this window to stop the session, then run onboarding again.';
+      refreshStatus();
+      return;
+    }
+    REVKA_ONBOARD_FINISHING=true;
+    TERM.writeln('\r\n\x1b[2m[setup complete — starting Revka and preparing dashboard pairing…]\x1b[0m');
+    try{
+      await invoke('revka_onboard_complete');
+      await invoke('revka_pty_stop');
+      const status=await invoke('revka_status');
+      if(!status.onboarded) throw new Error('Revka onboarding completion could not be recorded');
+      if(!await startRevka(status.reachable,false)) throw new Error('Revka setup completed, but the daemon did not start');
+      const info=await invoke('revka_pairing_prepare');
+      if(myGen!==TERM_GEN) return;
+      const returnFocus=TERM_RETURN_FOCUS;
+      TERM_RETURN_FOCUS=null;
+      $('onboard-term').classList.remove('show');
+      renderRevkaPairing(info,returnFocus);
+      refreshStatus(); refreshApps();
+    }catch(e){
+      const message=String(e);
+      TERM.writeln('\r\n\x1b[31m'+message+'\x1b[0m');
+      $('term-hint').textContent=message.includes('Full onboarding')
+        ?'The provider-only update is not enough for first setup. Run onboarding again and choose Full onboarding.'
+        :'Setup was saved, but Desktop could not finish starting or pairing Revka. Retry from Settings → Apps.';
+      toast(message,true);
+    }finally{ REVKA_ONBOARD_FINISHING=false; }
+  }
   async function closeOnboardTerminal(){
+    const returnFocus=TERM_RETURN_FOCUS;
+    TERM_RETURN_FOCUS=null;
     $('onboard-term').classList.remove('show');
+    TERM_GEN++;
     PTY_OPEN=false;
     // Unconditional: the backend no-ops when nothing is running, but skipping
     // the call on a stale flag would leave the wizard alive invisibly.
     try{ await invoke('revka_pty_stop'); }catch(e){}
+    requestAnimationFrame(()=>{ try{ returnFocus?.focus(); }catch(e){} });
   }
+
+  // Keep keyboard focus inside whichever Revka setup dialog is visible. This
+  // also gives Escape a consistent close action for both steps of the flow.
+  document.addEventListener('keydown',event=>{
+    const overlay=$('revka-pairing').classList.contains('show')?$('revka-pairing'):($('onboard-term').classList.contains('show')?$('onboard-term'):null);
+    if(!overlay) return;
+    if(event.key==='Escape'){
+      event.preventDefault();
+      if(overlay.id==='revka-pairing') closeRevkaPairing(); else closeOnboardTerminal();
+      return;
+    }
+    if(event.key!=='Tab') return;
+    const focusable=[...overlay.querySelectorAll('button:not([disabled]),textarea,[tabindex]:not([tabindex="-1"])')]
+      .filter(element=>element.offsetParent!==null||element===document.activeElement);
+    if(!focusable.length) return;
+    const first=focusable[0], last=focusable[focusable.length-1];
+    if(!overlay.contains(document.activeElement)||(event.shiftKey&&document.activeElement===first)||(!event.shiftKey&&document.activeElement===last)){
+      event.preventDefault();
+      (event.shiftKey?last:first).focus();
+    }
+  });
 
   // ---------- Memory ----------
   function loadBrain(){ $('brain-frame').src='http://127.0.0.1:8090/?t='+Date.now(); }
@@ -1543,12 +1742,16 @@
     try{
       const revka=await invoke('revka_status');
       if(isCurrent()){
-        pill($('revka-app-pill'),revka.reachable&&!revka.stale,revka.stale?'restart required':(revka.reachable?'running':(revka.installed?'stopped':'not installed')));
+        const revkaReady=KumihoRevkaFlow.ready(revka);
+        pill($('revka-app-pill'),revkaReady,!revka.installed?'not installed':(!revka.onboarded?'setup required':(revka.stale?'restart required':(revka.reachable?'running':'stopped'))));
         $('revka-version').textContent=revka.version
           ?'Version '+revka.version+(revka.stale?' installed · serving '+(revka.serving_version||'an older build'):'')
           :'Not installed';
         $('revka-version-detail').textContent=(revka.managed?'Runtime · ~/.kumiho/apps/revka':'Runtime · standalone ~/.revka')+' · 127.0.0.1:'+revka.port;
         $('revka-app-install').textContent=!revka.installed?'Install':((REVKA_UPDATE?.update_available||revka.stale)?'Update':'Reinstall');
+        $('revka-onboard-btn').textContent=revka.onboarded?'Run onboarding again':'Set up';
+        $('revka-onboard-btn').disabled=!revka.installed;
+        $('revka-pair-btn').disabled=!revka.installed||!revka.onboarded||revka.stale||REVKA_PAIRING_PENDING;
       }
     }catch(e){ if(isCurrent()){ pill($('revka-app-pill'),false,'unavailable'); setLog('apps',String(e),true); } }
     try{

@@ -102,6 +102,7 @@ jobs:
           node scripts/test-html5-file-drop.cjs
           node scripts/test-9miho-update.cjs
           node scripts/test-revka-lifecycle.cjs
+          node scripts/test-revka-onboarding.cjs
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable

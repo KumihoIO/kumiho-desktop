@@ -1,16 +1,17 @@
 //! Embedded onboarding terminal.
 //!
 //! One real PTY (ConPTY on Windows, OpenPTY elsewhere via portable-pty) runs
-//! the host's interactive shell — detected per OS — and Desktop "types"
-//! `"<revka> onboard"` into it, so the wizard renders and reads input exactly
-//! as it does in a user-opened terminal. Output streams to the webview through
-//! a Tauri channel; the reader thread reassembles split UTF-8 sequences so
-//! Korean text survives chunk boundaries.
+//! `revka onboard` directly, so the wizard renders and reads input exactly as
+//! it does in a user-opened terminal. Running the CLI directly matters: an
+//! interactive shell would stay alive after the wizard and hide the only
+//! reliable completion signal Revka currently exposes — its process exit.
+//! Output streams to the webview through a Tauri channel; the reader thread
+//! reassembles split UTF-8 sequences so Korean text survives chunk boundaries.
 
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tauri::ipc::Channel;
 
 const INITIAL_ROWS: u16 = 24;
@@ -20,13 +21,13 @@ const INITIAL_COLS: u16 = 80;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PtyEvent {
     Data { data: String },
-    Exit,
+    Exit { success: bool },
 }
 
 pub struct PtySession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send + Sync>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
 impl PtySession {
@@ -48,98 +49,6 @@ impl PtySession {
                 pixel_height: 0,
             })
             .map_err(|e| format!("could not resize the terminal: {e}"))
-    }
-}
-
-/// Which shell the onboarding terminal will run. The label is shown in the UI;
-/// the PowerShell flag decides how a quoted command must be invoked.
-#[derive(Serialize)]
-pub struct ShellChoice {
-    pub label: String,
-    /// PowerShell parses `"exe" args` in expression mode and rejects it —
-    /// such commands need the `&` call operator.
-    #[serde(skip)]
-    pub power_shell: bool,
-}
-
-fn find_in_path(program: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var)
-        .map(|dir| dir.join(program))
-        .find(|candidate| candidate.is_file())
-}
-
-fn windows_shell() -> Option<(String, String, Vec<String>, bool)> {
-    if let Some(pwsh) = find_in_path("pwsh.exe") {
-        return Some((
-            "PowerShell 7".into(),
-            pwsh.to_string_lossy().into_owned(),
-            vec!["-NoLogo".into()],
-            true,
-        ));
-    }
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-    let powershell = Path::new(&system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    if powershell.is_file() {
-        return Some((
-            "Windows PowerShell".into(),
-            powershell.to_string_lossy().into_owned(),
-            vec!["-NoLogo".into()],
-            true,
-        ));
-    }
-    if let Some(comspec) = std::env::var_os("ComSpec") {
-        // Some wrappers store ComSpec with surrounding quotes; strip them so
-        // the path actually resolves.
-        let trimmed = comspec.to_string_lossy().trim_matches('"').to_string();
-        if Path::new(&trimmed).is_file() {
-            return Some(("Command Prompt".into(), trimmed, Vec::new(), false));
-        }
-    }
-    None
-}
-
-#[cfg(not(windows))]
-fn unix_shell() -> Option<(String, String, Vec<String>, bool)> {
-    if let Some(shell) = std::env::var_os("SHELL") {
-        let shell = PathBuf::from(shell);
-        if shell.is_file() {
-            let label = shell
-                .file_stem()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "shell".into());
-            return Some((
-                label,
-                shell.to_string_lossy().into_owned(),
-                Vec::new(),
-                false,
-            ));
-        }
-    }
-    for candidate in ["/bin/bash", "/bin/sh"] {
-        if Path::new(candidate).is_file() {
-            let label = Path::new(candidate)
-                .file_stem()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "shell".into());
-            return Some((label, candidate.into(), Vec::new(), false));
-        }
-    }
-    None
-}
-
-fn detect_shell() -> Result<(String, String, Vec<String>, bool), String> {
-    #[cfg(windows)]
-    {
-        windows_shell().ok_or_else(|| "no usable shell found on this machine".to_string())
-    }
-    #[cfg(not(windows))]
-    {
-        unix_shell().ok_or_else(|| "no usable shell found on this machine".to_string())
     }
 }
 
@@ -189,15 +98,17 @@ impl Utf8Feeder {
     }
 }
 
-/// Spawn the host shell in a fresh PTY, stream its output through `on_data`,
-/// and register the session in `state`. Returns the shell label for the UI.
-pub fn spawn_session(
+/// Spawn a command directly in a fresh PTY, stream its output through
+/// `on_data`, and register a split-out killer in `state`. Output draining and
+/// process waiting use separate threads: on Windows the retained ConPTY master
+/// can prevent EOF until Desktop handles Exit and drops the session.
+pub fn spawn_command_session(
     state: &crate::AppState,
-    revka_bin: &Path,
+    program: &Path,
+    args: &[&str],
     on_data: Channel<PtyEvent>,
-) -> Result<ShellChoice, String> {
+) -> Result<(), String> {
     stop_session(state)?;
-    let (label, program, args, power_shell) = detect_shell()?;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -208,28 +119,16 @@ pub fn spawn_session(
         })
         .map_err(|e| format!("could not open a pseudo terminal: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(&program);
-    cmd.args(&args);
+    let mut cmd = CommandBuilder::new(program);
+    cmd.args(args);
     if let Some(home) = dirs::home_dir() {
         cmd.cwd(home);
     }
-    // Put Desktop's Revka first on PATH so `revka` resolves inside the
-    // terminal even before any User-PATH entry exists.
-    if let Some(bin_dir) = revka_bin.parent() {
-        let path_key = if cfg!(windows) { "Path" } else { "PATH" };
-        let current = std::env::var_os(path_key).unwrap_or_default();
-        let mut parts = vec![bin_dir.to_path_buf()];
-        parts.extend(std::env::split_paths(&current));
-        cmd.env(
-            path_key,
-            std::env::join_paths(parts).map_err(|e| e.to_string())?,
-        );
-    }
 
-    let child = pair
+    let mut child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| format!("could not start {label}: {e}"))?;
+        .map_err(|e| format!("could not start {}: {e}", program.display()))?;
     // Nothing else needs the slave side; keeping it open would block EOFs.
     drop(pair.slave);
 
@@ -254,6 +153,17 @@ pub fn spawn_session(
         }
     };
 
+    let killer = child.clone_killer();
+    {
+        let mut guard = state.revka_pty.lock().map_err(|e| e.to_string())?;
+        *guard = Some(PtySession {
+            writer,
+            master: pair.master,
+            killer,
+        });
+    }
+
+    let exit_events = on_data.clone();
     std::thread::spawn(move || {
         let mut feeder = Utf8Feeder::new();
         let mut buffer = [0_u8; 4096];
@@ -268,25 +178,12 @@ pub fn spawn_session(
                 }
             }
         }
-        let _ = on_data.send(PtyEvent::Exit);
     });
-
-    let registration = state.revka_pty.lock().map(|mut guard| {
-        *guard = Some(PtySession {
-            writer,
-            master: pair.master,
-            child,
-        });
+    std::thread::spawn(move || {
+        let success = child.wait().is_ok_and(|status| status.success());
+        let _ = exit_events.send(PtyEvent::Exit { success });
     });
-    if let Err(e) = registration {
-        return Err(e.to_string());
-    }
-    Ok(ShellChoice { label, power_shell })
-}
-
-/// Type the quoted command into the running shell, as if the user typed it.
-pub fn type_command(state: &crate::AppState, command_line: &str) -> Result<(), String> {
-    write_input(state, &format!("{command_line}\r"))
+    Ok(())
 }
 
 /// Forward raw keystrokes from the webview terminal widget.
@@ -305,8 +202,7 @@ pub fn resize(state: &crate::AppState, rows: u16, cols: u16) -> Result<(), Strin
 pub fn stop_session(state: &crate::AppState) -> Result<(), String> {
     let mut guard = state.revka_pty.lock().map_err(|e| e.to_string())?;
     if let Some(mut session) = guard.take() {
-        let _ = session.child.kill();
-        let _ = session.child.wait();
+        let _ = session.killer.kill();
         // Dropping the master closes the pty; the reader thread then exits.
     }
     Ok(())

@@ -22,6 +22,8 @@ use tauri::{Manager, State};
 
 const REVKA_PORT: u16 = 42617;
 const RELEASE_API_URL: &str = "https://api.github.com/repos/KumihoIO/Revka/releases/latest";
+const REVKA_PAIRING_URL: &str = "http://127.0.0.1:42617/admin/paircode";
+const REVKA_PAIRING_NEW_URL: &str = "http://127.0.0.1:42617/admin/paircode/new";
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 /// How long a Revka gets to shut down gracefully before we force it.
 const STOP_GRACE: Duration = Duration::from_secs(8);
@@ -38,6 +40,20 @@ struct GhAsset {
 struct GhRelease {
     tag_name: String,
     assets: Vec<GhAsset>,
+}
+
+#[derive(Deserialize)]
+struct ActiveWorkspaceState {
+    config_dir: String,
+}
+
+#[derive(Deserialize)]
+struct PairingResponse {
+    success: bool,
+    pairing_required: bool,
+    pairing_code: Option<String>,
+    #[serde(default)]
+    message: String,
 }
 
 /// The release asset published for this machine's platform/architecture.
@@ -255,6 +271,114 @@ fn install_root() -> Option<PathBuf> {
     kumiho_home().map(|home| home.join("apps").join("revka"))
 }
 
+fn expand_revka_path(raw: &str, home: &Path) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
+        home.join(rest)
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+/// Revka gives a non-empty HOME precedence over the platform user directory,
+/// including on Windows. Match that policy so Desktop validates the same
+/// workspace that the directly-spawned wizard just wrote.
+fn revka_home_dir() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(PathBuf::from(home));
+        }
+    }
+    dirs::home_dir()
+}
+
+/// Resolve the same config/workspace pair used by the released Revka CLI.
+/// Desktop only needs the files created by onboarding, but it must honor
+/// custom and persisted workspaces or a real existing setup looks unfinished.
+fn revka_runtime_dirs() -> Option<(PathBuf, PathBuf)> {
+    let home = revka_home_dir()?;
+    let default_config = home.join(".revka");
+
+    if let Ok(raw) = std::env::var("REVKA_CONFIG_DIR") {
+        if !raw.trim().is_empty() {
+            let config = expand_revka_path(&raw, &home);
+            return Some((config.clone(), config.join("workspace")));
+        }
+    }
+
+    if let Ok(raw) = std::env::var("REVKA_WORKSPACE") {
+        if !raw.trim().is_empty() {
+            let requested = expand_revka_path(&raw, &home);
+            if requested.join("config.toml").is_file() {
+                return Some((requested.clone(), requested.join("workspace")));
+            }
+            if let Some(parent) = requested.parent() {
+                let legacy = parent.join(".revka");
+                if legacy.join("config.toml").is_file()
+                    || requested
+                        .file_name()
+                        .is_some_and(|name| name == "workspace")
+                {
+                    return Some((legacy, requested));
+                }
+            }
+            return Some((requested.clone(), requested.join("workspace")));
+        }
+    }
+
+    let active = default_config.join("active_workspace.toml");
+    if let Ok(raw) = fs::read_to_string(active) {
+        if let Ok(state) = toml::from_str::<ActiveWorkspaceState>(&raw) {
+            if !state.config_dir.trim().is_empty() {
+                let config = expand_revka_path(&state.config_dir, &home);
+                let config = if config.is_absolute() {
+                    config
+                } else {
+                    default_config.join(config)
+                };
+                return Some((config.clone(), config.join("workspace")));
+            }
+        }
+    }
+
+    Some((default_config.clone(), default_config.join("workspace")))
+}
+
+fn onboarding_artifacts_complete_at(config_dir: &Path, workspace_dir: &Path) -> bool {
+    config_dir.join("config.toml").is_file()
+        && ["AGENTS.md", "USER.md", "TOOLS.md"]
+            .iter()
+            .all(|name| workspace_dir.join(name).is_file())
+}
+
+fn require_full_onboarding_at(config_dir: &Path, workspace_dir: &Path) -> Result<(), String> {
+    if onboarding_artifacts_complete_at(config_dir, workspace_dir) {
+        Ok(())
+    } else {
+        Err(
+            "Revka exited without completing the full workspace setup. Run onboarding again and choose Full onboarding when an existing config is detected."
+                .into(),
+        )
+    }
+}
+
+/// Compatibility signal for users who completed onboarding outside Desktop.
+/// A config alone is deliberately insufficient: Revka creates one from
+/// `load_or_init()` before onboarding and only the wizard adds this scaffold.
+fn onboarding_artifacts_complete() -> bool {
+    revka_runtime_dirs()
+        .is_some_and(|(config, workspace)| onboarding_artifacts_complete_at(&config, &workspace))
+}
+
+fn onboarding_complete() -> bool {
+    onboarding_artifacts_complete()
+}
+
 /// A pre-existing install from Revka's own installer scripts.
 fn standalone_binary() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
@@ -434,6 +558,84 @@ fn health_response_ok(response: &[u8]) -> bool {
         .ok()
         .and_then(|body| body.get("status")?.as_str().map(str::to_owned))
         .is_some_and(|status| status == "ok")
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+pub struct RevkaPairingInfo {
+    pub success: bool,
+    pub pairing_required: bool,
+    /// One-time six-digit code. It is returned to the webview only and is
+    /// never written to a Desktop log, config file, or runtime stamp.
+    pub pairing_code: Option<String>,
+    pub message: String,
+}
+
+fn parse_pairing_response(text: &str) -> Result<RevkaPairingInfo, String> {
+    let response: PairingResponse =
+        serde_json::from_str(text).map_err(|e| format!("invalid Revka pairing response: {e}"))?;
+    if let Some(code) = response.pairing_code.as_deref() {
+        if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("Revka returned an invalid pairing code".into());
+        }
+    }
+    Ok(RevkaPairingInfo {
+        success: response.success,
+        pairing_required: response.pairing_required,
+        pairing_code: response.pairing_code,
+        message: response.message,
+    })
+}
+
+fn validate_pairing_http(
+    status: u16,
+    issue_new: bool,
+    info: RevkaPairingInfo,
+) -> Result<RevkaPairingInfo, String> {
+    let pairing_disabled = issue_new
+        && status == 400
+        && !info.success
+        && !info.pairing_required
+        && info.pairing_code.is_none();
+    if pairing_disabled {
+        return Ok(info);
+    }
+    if !(200..300).contains(&status) || !info.success {
+        return Err(if info.message.is_empty() {
+            format!("Revka pairing request failed with HTTP {status}")
+        } else {
+            info.message
+        });
+    }
+    if issue_new && info.pairing_required && info.pairing_code.is_none() {
+        return Err("Revka did not return a new pairing code".into());
+    }
+    Ok(info)
+}
+
+fn pairing_request(issue_new: bool) -> Result<RevkaPairingInfo, String> {
+    if !health_probe() {
+        return Err("Revka is not ready on 127.0.0.1:42617".into());
+    }
+    let response = if issue_new {
+        ureq::post(REVKA_PAIRING_NEW_URL)
+            .timeout(Duration::from_secs(5))
+            .call()
+    } else {
+        ureq::get(REVKA_PAIRING_URL)
+            .timeout(Duration::from_secs(5))
+            .call()
+    };
+    let (status, response) = match response {
+        Ok(response) => (response.status(), response),
+        Err(ureq::Error::Status(status, response)) => (status, response),
+        Err(error) => return Err(format!("could not reach Revka pairing service: {error}")),
+    };
+    let text = response
+        .into_string()
+        .map_err(|e| format!("could not read Revka pairing response: {e}"))?;
+    let info = parse_pairing_response(&text)?;
+    // Only POST /new uses HTTP 400 as a valid pairing-disabled response.
+    validate_pairing_http(status, issue_new, info)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -659,6 +861,12 @@ fn lifecycle_lock(state: &AppState) -> Result<std::sync::MutexGuard<'_, ()>, Str
 
 /// Caller must hold [`lifecycle_lock`].
 fn start_revka(state: &AppState) -> Result<String, String> {
+    if !onboarding_complete() {
+        return Err(
+            "Revka setup is required — open Revka in Kumiho Desktop and run onboarding first"
+                .into(),
+        );
+    }
     let (reachable, serving) = runtime_state();
     if reachable && !is_stale(installed_version().as_deref(), true, serving.as_deref()) {
         return Ok("Revka already serving on 42617".into());
@@ -748,6 +956,9 @@ pub struct RevkaStatus {
     /// pre-existing standalone install.
     pub managed: bool,
     pub installed: bool,
+    /// Installation and setup are intentionally separate. A default
+    /// config.toml can exist before the interactive wizard has ever run.
+    pub onboarded: bool,
     pub version: Option<String>,
     /// The build answering on 42617 according to our stamp — None for daemons
     /// Desktop did not spawn.
@@ -771,6 +982,7 @@ pub fn revka_status() -> RevkaStatus {
         port: REVKA_PORT,
         managed: managed_binary().is_some(),
         installed: installed_binary().is_some(),
+        onboarded: onboarding_complete(),
         stale: is_stale(version.as_deref(), reachable, serving_version.as_deref()),
         serving_version,
         version,
@@ -820,11 +1032,15 @@ pub fn revka_install(state: State<AppState>) -> Result<String, String> {
         let _lifecycle = lifecycle_lock(app)?;
         stop_revka(app)?;
         replace_runtime(&root, &staged_binary, &latest_version)?;
-        Ok(match start_revka(app) {
-            Ok(_) => format!("Revka {latest_version} installed and restarted"),
-            Err(error) => {
-                format!("Revka {latest_version} installed, but it did not restart: {error}")
+        Ok(if onboarding_complete() {
+            match start_revka(app) {
+                Ok(_) => format!("Revka {latest_version} installed and restarted"),
+                Err(error) => {
+                    format!("Revka {latest_version} installed, but it did not restart: {error}")
+                }
             }
+        } else {
+            format!("Revka {latest_version} installed — setup required")
         })
     })();
     if staging.exists() {
@@ -846,34 +1062,56 @@ pub fn revka_stop(state: State<AppState>) -> Result<String, String> {
     Ok("Revka stopped".into())
 }
 
+/// The UI calls this only after the directly-spawned wizard exits successfully.
+/// Revka's provider-only path also exits zero, so require the full workspace
+/// scaffold before Desktop advances to daemon startup and dashboard pairing.
+#[tauri::command]
+pub fn revka_onboard_complete() -> Result<(), String> {
+    let (config, workspace) = revka_runtime_dirs().ok_or("no home directory")?;
+    require_full_onboarding_at(&config, &workspace)
+}
+
+/// Fetch the current active code, issuing one only when pairing is enabled and
+/// no code exists. This keeps a still-valid one-time code stable across UI
+/// retries instead of rotating it on every click.
+#[tauri::command]
+pub fn revka_pairing_prepare() -> Result<RevkaPairingInfo, String> {
+    if !onboarding_complete() {
+        return Err("Finish Revka onboarding before pairing the dashboard".into());
+    }
+    let current = pairing_request(false)?;
+    if !current.pairing_required || current.pairing_code.is_some() {
+        return Ok(current);
+    }
+    pairing_request(true)
+}
+
+/// Explicit user action: replace any active one-time code with a fresh code.
+#[tauri::command]
+pub fn revka_pairing_new() -> Result<RevkaPairingInfo, String> {
+    if !onboarding_complete() {
+        return Err("Finish Revka onboarding before pairing the dashboard".into());
+    }
+    pairing_request(true)
+}
+
 #[derive(Serialize)]
 pub struct OnboardStarted {
-    /// Human-readable shell name shown in the terminal header.
+    /// Human-readable process label shown in the terminal header.
     pub shell: String,
 }
 
-/// Open the embedded onboarding terminal: a real PTY running the host shell,
-/// with the onboarding wizard typed into it. The wizard is fully interactive —
-/// keystrokes flow back through revka_pty_write.
+/// Open the embedded onboarding terminal with Revka itself as the PTY child.
+/// The wizard is fully interactive and its actual process exit reaches the UI.
 #[tauri::command]
 pub fn revka_onboard_start(
     state: State<AppState>,
     on_data: tauri::ipc::Channel<crate::pty::PtyEvent>,
 ) -> Result<OnboardStarted, String> {
     let binary = installed_binary().ok_or("Revka is not installed yet")?;
-    let choice = crate::pty::spawn_session(&state, &binary, on_data)?;
-    // Typed immediately after spawn: tty input buffers hold it until the
-    // interactive shell is ready to read, so no timing guesswork is needed.
-    let invocation = if choice.power_shell {
-        // PowerShell parses a statement starting with a quoted string in
-        // expression mode; only the call operator runs it as a command.
-        format!("& \"{}\" onboard", binary.display())
-    } else {
-        format!("\"{}\" onboard", binary.display())
-    };
-    crate::pty::type_command(&state, &invocation)?;
+    crate::pty::spawn_command_session(&state, &binary, &["onboard"], on_data)?;
     Ok(OnboardStarted {
-        shell: choice.label,
+        shell: "Revka CLI".into(),
     })
 }
 
@@ -896,7 +1134,9 @@ pub fn revka_pty_stop(state: State<AppState>) -> Result<(), String> {
 mod tests {
     use super::{
         checksum_for, health_response_ok, installed_version_at, is_stale, newer_version_available,
-        parse_release, release_asset_name, replace_runtime, runtime_identity_matches, tag_version,
+        onboarding_artifacts_complete_at, parse_pairing_response, parse_release,
+        release_asset_name, replace_runtime, require_full_onboarding_at, runtime_identity_matches,
+        tag_version, validate_pairing_http,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1034,6 +1274,74 @@ mod tests {
             b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 2\r\n\r\n{}"
         ));
         assert!(!health_response_ok(b"HTTP/1.1 200 OK\r\n")); // headers incomplete
+    }
+
+    #[test]
+    fn a_default_config_without_the_onboarding_scaffold_is_not_ready() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kumiho-desktop-revka-onboarding-{}-{unique}",
+            std::process::id()
+        ));
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("create workspace");
+        fs::write(root.join("config.toml"), b"default_provider = 'openrouter'")
+            .expect("write config");
+        fs::write(workspace.join("IDENTITY.md"), b"identity").expect("write identity");
+        fs::write(workspace.join("SOUL.md"), b"soul").expect("write soul");
+        assert!(!onboarding_artifacts_complete_at(&root, &workspace));
+        assert!(require_full_onboarding_at(&root, &workspace).is_err());
+
+        for name in ["AGENTS.md", "USER.md", "TOOLS.md"] {
+            fs::write(workspace.join(name), name.as_bytes()).expect("write scaffold");
+        }
+        assert!(onboarding_artifacts_complete_at(&root, &workspace));
+        assert!(require_full_onboarding_at(&root, &workspace).is_ok());
+        fs::remove_dir_all(root).expect("remove test workspace");
+    }
+
+    #[test]
+    fn pairing_response_accepts_only_six_numeric_digits() {
+        let info = parse_pairing_response(
+            r#"{"success":true,"pairing_required":true,"pairing_code":"481205","message":"ready"}"#,
+        )
+        .expect("valid pairing response");
+        assert!(info.pairing_required);
+        assert_eq!(info.pairing_code.as_deref(), Some("481205"));
+        assert!(parse_pairing_response(
+            r#"{"success":true,"pairing_required":true,"pairing_code":"abc123","message":"bad"}"#
+        )
+        .is_err());
+        assert!(parse_pairing_response(
+            r#"{"success":true,"pairing_required":true,"pairing_code":"12345","message":"bad"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pairing_disabled_is_a_valid_code_free_state() {
+        let info = parse_pairing_response(
+            r#"{"success":false,"pairing_required":false,"pairing_code":null,"message":"disabled"}"#,
+        )
+        .expect("pairing disabled response");
+        assert!(!info.pairing_required);
+        assert_eq!(info.pairing_code, None);
+        assert!(validate_pairing_http(400, true, info).is_ok());
+
+        let invalid_failure = parse_pairing_response(
+            r#"{"success":false,"pairing_required":false,"pairing_code":null,"message":"failure"}"#,
+        )
+        .expect("structured failure response");
+        assert!(validate_pairing_http(500, true, invalid_failure).is_err());
+
+        let missing_code = parse_pairing_response(
+            r#"{"success":true,"pairing_required":true,"pairing_code":null,"message":"missing"}"#,
+        )
+        .expect("structured missing-code response");
+        assert!(validate_pairing_http(200, true, missing_code).is_err());
     }
 
     #[test]

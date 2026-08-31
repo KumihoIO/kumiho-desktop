@@ -6,12 +6,12 @@ const backend = fs.readFileSync('src-tauri/src/revka.rs', 'utf8');
 
 assert.match(
   ui,
-  /if\(!await startRevka\(false\)\) throw new Error\('Revka was installed but did not restart'\);[\s\S]*setLog\('apps','✓ '\+result\);/,
+  /const result=await invoke\('revka_install'\);[\s\S]*const status=await invoke\('revka_status'\);[\s\S]*if\(!status\.onboarded\) await openOnboardTerminal\(\);[\s\S]*else if\(\(status\.stale\|\|!status\.reachable\) && !await startRevka\(status\.reachable\)\)/,
 );
-assert.match(ui, /const visiblyReachable=r\.reachable&&!r\.stale;/);
+assert.match(ui, /const visiblyReachable=r\.onboarded&&r\.reachable&&!r\.stale;/);
 assert.match(
   ui,
-  /pill\(\$\('revka-app-pill'\),revka\.reachable&&!revka\.stale,revka\.stale\?'restart required'/,
+  /const revkaReady=KumihoRevkaFlow\.ready\(revka\);[\s\S]*pill\(\$\('revka-app-pill'\),revkaReady/,
 );
 assert.match(
   ui,
