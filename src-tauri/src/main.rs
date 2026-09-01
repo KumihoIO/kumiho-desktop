@@ -13,6 +13,9 @@ mod docker;
 mod embedding;
 mod memory;
 mod miho;
+mod process_tree;
+mod pty;
+mod revka;
 mod run;
 mod startup;
 mod update;
@@ -21,6 +24,7 @@ mod util;
 mod window;
 
 use std::sync::Mutex;
+use tauri::Manager;
 
 /// App-wide state for child processes started by Desktop.
 #[derive(Default)]
@@ -35,6 +39,13 @@ pub struct AppState {
     /// Held across 9miho's check-then-spawn so two UI paths cannot both decide
     /// the port is free and each launch a runtime.
     pub miho_start: Mutex<()>,
+    pub revka: Mutex<Option<revka::TrackedRevka>>,
+    /// Same serialization for Revka's stop / swap / spawn.
+    pub revka_start: Mutex<()>,
+    /// The embedded onboarding terminal, when one is open.
+    pub revka_pty: Mutex<Option<pty::PtySession>>,
+    /// Serializes stop/open/spawn/register for onboarding PTY replacement.
+    pub revka_pty_start: Mutex<()>,
 }
 
 fn main() {
@@ -82,6 +93,19 @@ fn main() {
             miho::miho_update,
             miho::miho_start,
             miho::miho_stop,
+            // Revka — release install + daemon lifecycle + onboarding terminal
+            revka::revka_status,
+            revka::revka_check_update,
+            revka::revka_install,
+            revka::revka_onboard_start,
+            revka::revka_onboard_complete,
+            revka::revka_pairing_prepare,
+            revka::revka_pairing_new,
+            revka::revka_pty_write,
+            revka::revka_pty_resize,
+            revka::revka_pty_stop,
+            revka::revka_start,
+            revka::revka_stop,
             // Docker — Neo4j + Redis dependencies
             docker::docker_status,
             docker::docker_up,
@@ -125,6 +149,8 @@ fn main() {
                 run::kill_pending_ce(app);
                 run::kill_brain();
                 miho::kill_tracked_miho(app);
+                revka::kill_tracked_revka(app);
+                let _ = pty::stop_session(&app.state::<AppState>());
             }
             // Clicking the Dock icon is how macOS asks for the window back once
             // the last one was closed. Without this the app stays running with

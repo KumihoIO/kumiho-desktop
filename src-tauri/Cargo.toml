@@ -21,6 +21,7 @@ tauri-plugin-single-instance = "2"  # collapse a duplicate launch (updater relau
 tauri-plugin-autostart = "2"        # "launch at login" (Run key / LaunchAgent / .desktop)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"    # Revka: read its active_workspace.toml without guessing escaped paths
 semver = "1"
 dirs = "5"      # locate ~/.kumiho for the Run pillar
 ureq = "2"      # Account: probe the cloud control plane natively — a webview
@@ -28,6 +29,9 @@ ureq = "2"      # Account: probe the cloud control plane natively — a webview
 sha2 = "0.10"   # component updates: verify the published archive checksum
 minisign-verify = "0.2" # component updates: verify archives with the Desktop updater key
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"         # Revka: unix release archives are tar.gz
+flate2 = "1"        # Revka: gzip reader for the tar archives
+portable-pty = "0.9" # Revka onboarding terminal: real PTY (ConPTY/OpenPTY) for the interactive wizard
 
 # Retiring 9miho: SIGTERM before SIGKILL so the PyInstaller onefile runtime can
 # remove its extracted _MEI temp directory. std only offers SIGKILL.
@@ -42,6 +46,7 @@ keyring = { version = "3", features = ["apple-native"] }        # Keychain
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }      # Credential Manager
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }  # libsecret via D-Bus

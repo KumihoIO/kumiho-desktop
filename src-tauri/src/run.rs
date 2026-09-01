@@ -463,7 +463,7 @@ fn uncertain_ce_launch(home: &Path) -> Result<bool, String> {
     }
 }
 
-fn process_identity(pid: u32) -> Result<Option<String>, String> {
+pub(crate) fn process_identity(pid: u32) -> Result<Option<String>, String> {
     #[cfg(windows)]
     let output = {
         let script = format!(
