@@ -34,8 +34,13 @@ as sidecars. The Desktop app can install and run 9miho without source
 access, Python, Node, or a GitHub login.
 
 > On Windows the build isn't code-signed yet, so SmartScreen may say
-> "unrecognized app" → **More info → Run anyway**. macOS builds are signed and
-> notarized.
+> "unrecognized app" → **More info → Run anyway**. For the same reason, Windows
+> Defender may report a **`Trojan:Win32/Wacatac.B!ml`** false positive on the
+> installer — this is a machine-learning heuristic misfiring on an unsigned
+> binary, not actual malware. See
+> [**docs/WINDOWS_SECURITY.md**](docs/WINDOWS_SECURITY.md) for why it happens,
+> how to confirm the download is genuine, and how to let it through. macOS builds
+> are signed and notarized.
 
 ### Staying up to date
 
