@@ -20,6 +20,10 @@ const NEO4J_NAMES: &[&str] = &["kumiho-ce-neo4j", "kumiho-neo4j", "neo4j"];
 const REDIS_NAMES: &[&str] = &["kumiho-ce-redis", "kumiho-redis", "redis"];
 const NEO4J_DEFAULT: u16 = 7687;
 const REDIS_DEFAULT: u16 = 6379;
+/// Named volume for the Redis data directory. The image declares an anonymous
+/// `/data` volume, which `docker rm` orphans; a name keeps the append-only file
+/// findable and lets a recreated container pick it straight back up.
+const REDIS_VOLUME: &str = "kumiho-ce-redis-data";
 const NEO4J_MIN_PASSWORD_LENGTH: usize = 8;
 const DOCKER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const DOCKER_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -493,6 +497,12 @@ fn docker_up_blocking(
 
     if use_redis {
         if need_redis {
+            // Append-only file on a named volume. Redis's default persistence is
+            // periodic RDB snapshots plus a final one on SIGTERM -- and Docker
+            // Desktop going down with the machine delivers no SIGTERM, so every
+            // such stop lost whatever working memory had written since the last
+            // snapshot (up to an hour on a quiet session). Mirrors
+            // deploy/docker-compose.yml in kumiho-server-community.
             let create = vec![
                 "run".into(),
                 "-d".into(),
@@ -502,7 +512,12 @@ fn docker_up_blocking(
                 "unless-stopped".into(),
                 "-p".into(),
                 format!("127.0.0.1:{redis_port}:6379"),
+                "-v".into(),
+                format!("{}:/data", REDIS_VOLUME),
                 "redis:7".into(),
+                "redis-server".into(),
+                "--appendonly".into(),
+                "yes".into(),
             ];
             notes.push(start_or_create(
                 REDIS_NAMES,
