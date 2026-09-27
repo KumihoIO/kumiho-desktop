@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod account;
+mod backup;
 mod config;
 mod connect;
 mod docker;
@@ -79,6 +80,7 @@ fn main() {
             run::ce_start,
             run::ce_stop,
             run::ce_log_tail,
+            backup::ce_import_backup,
             run::brain_status,
             run::brain_start,
             run::brain_stop,
