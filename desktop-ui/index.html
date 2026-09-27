@@ -277,6 +277,14 @@
             <div class="row" style="font-size:13px" id="db-lines"></div>
             <div class="row"><button id="db-start-btn" onclick="dbUp()">Start databases</button><button id="db-stop-btn" onclick="dbDown()">Stop databases</button></div>
           </div>
+          <div class="card" id="ce-backup-card">
+            <div class="row"><span class="b">Import Cloud backup</span></div>
+            <p class="dim" style="font-size:13px">Choose the .kumiho file downloaded from your Cloud dashboard. Stop the CE server above, keep Neo4j running, and stop other database writers. The target database must be empty; existing data is never replaced or merged.</p>
+            <label class="field"><span class="lab">Backup file · maximum 64 MiB</span><input id="ce-backup-file" type="file" accept=".kumiho" onchange="backupFileChanged()"></label>
+            <div class="row"><button id="ce-import-btn" class="primary" onclick="importCeBackup()" disabled>Import and verify</button></div>
+            <p id="ce-import-status" role="status" aria-live="polite" class="dim" style="font-size:13px"></p>
+            <p class="faint" style="font-size:12px">Graph data only. External artifact files and Redis history are excluded. Keep the Cloud data and original backup until you have checked your restored workspace.</p>
+          </div>
           <div class="card" id="ce-embed-settings">
             <div class="row"><div class="grow"><span class="b">Vector search</span> <span class="faint">optional · embeddings</span></div><span class="pill" id="embed-pill">…</span></div>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:10px"><input type="checkbox" id="s-embed-enabled" onchange="toggleSettingsEmbedding()"><span>Enable vector search (embeddings)</span></label>
@@ -402,6 +410,7 @@
 
 <script src="./server-health.js"></script>
 <script src="./ce-setup.js"></script>
+<script src="./backup.js"></script>
 <script src="./embedding.js"></script>
 <script src="./revka-flow.js"></script>
 <script src="./assets/vendor/xterm.js"></script>
@@ -989,6 +998,9 @@
     updateCeControlButtons(ce.reachable,ce.managed,ce.stoppable);
   }
   function updateCeControlButtons(reachable=CE_LAST_REACHABLE,managed=CE_LAST_MANAGED,stoppable=CE_LAST_STOPPABLE){
+    const backupFile=$('ce-backup-file'), importButton=$('ce-import-btn');
+    if(backupFile) backupFile.disabled=CE_STARTING;
+    if(importButton){ importButton.disabled=CE_STARTING||!!KumihoDesktopBackup.fileError(backupFile?.files?.[0]); importButton.textContent=CE_ACTION==='import'?'Importing and verifying…':'Import and verify'; importButton.setAttribute('aria-busy',String(CE_ACTION==='import')); }
     CE_LAST_REACHABLE=!!reachable;
     CE_LAST_MANAGED=!!managed;
     CE_LAST_STOPPABLE=stoppable!==false;
@@ -1001,6 +1013,22 @@
     if(update){ update.disabled=CE_STARTING||manualRecovery; update.textContent=CE_ACTION==='update'?'Updating…':'Update CE'; update.title=manualRecovery?'Stop the server manually before updating.':''; update.setAttribute('aria-busy',String(CE_ACTION==='update')); }
     if(dbStart){ dbStart.disabled=CE_STARTING; dbStart.textContent=CE_ACTION==='db-start'?'Starting…':'Start databases'; dbStart.setAttribute('aria-busy',String(CE_ACTION==='db-start')); }
     if(dbStop){ dbStop.disabled=CE_STARTING; dbStop.textContent=CE_ACTION==='db-stop'?'Stopping…':'Stop databases'; dbStop.setAttribute('aria-busy',String(CE_ACTION==='db-stop')); }
+  }
+  function backupFileChanged(){
+    const error=KumihoDesktopBackup.fileError($('ce-backup-file').files[0]);
+    $('ce-import-status').textContent=error||'Ready. Stop CE before importing into your empty local database.';
+    updateCeControlButtons();
+  }
+  async function importCeBackup(){
+    if(!beginCeAction('import'))return;
+    const status=$('ce-import-status');
+    try {
+      const result=await KumihoDesktopBackup.importBackup({file:$('ce-backup-file').files[0],invoke,status:text=>{status.textContent=text;status.setAttribute('role','status');}});
+      status.textContent=result;
+      $('ce-backup-file').value='';
+      toast('Backup imported and verified');
+    } catch(error) { status.textContent=String(error);status.setAttribute('role','alert'); }
+    finally { await finishCeAction(false); }
   }
   function beginCeAction(action){ if(CE_STARTING)return false; CE_STARTING=true; CE_ACTION=action; updateCeControlButtons(); return true; }
   async function finishCeAction(checkLatest=true){ CE_STARTING=false; CE_ACTION=''; await (checkLatest?refreshRun():refreshRunLocal()); refreshStatus(); }
