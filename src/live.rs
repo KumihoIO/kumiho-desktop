@@ -7,6 +7,7 @@
 //! because writers create edges alongside the revisions they link.
 
 use crate::config::Config;
+use crate::fetch::pick_source;
 use crate::model::{item_uri, GraphStore, NodeSeed, StreamEvent};
 use futures::StreamExt;
 use kumiho::{Client, EdgeDirection, Event};
@@ -127,12 +128,14 @@ impl LiveFeed {
                 ev.kref.item_name().to_string()
             }
         };
-        let source = ["source_client", "client", "agent", "created_by"]
-            .iter()
-            .map(|k| md(k))
-            .find(|v| !v.is_empty())
-            .or_else(|| item.as_ref().map(|i| i.username.clone()))
-            .unwrap_or_else(|| ev.author.clone());
+        let source = pick_source(
+            &rev.metadata,
+            &rev.username,
+            &[
+                item.as_ref().map_or("", |i| i.username.as_str()),
+                &ev.author,
+            ],
+        );
         let space = ev.kref.space();
         let space_path = if space.is_empty() {
             format!("/{}", ev.kref.project())
