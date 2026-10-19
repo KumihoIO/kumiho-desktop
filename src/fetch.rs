@@ -11,14 +11,17 @@ use crate::model::{
 };
 use futures::stream::{self, StreamExt};
 use kumiho::{Client, EdgeDirection, Item, Revision};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Metadata keys that may carry the originating client, most specific first.
-/// Today's writers record none of them (SDK gap, see README) — the author
-/// identity is the honest fallback.
-const SOURCE_KEYS: &[&str] = &["source_client", "client", "agent", "created_by"];
+/// Today's writers record none of them (SDK gap, see README) — the writer
+/// identity is the honest fallback. `created_by` is not here: kumiho-server
+/// hides it from read metadata (reserved key); the same value is carried in
+/// `Revision.username`.
+const SOURCE_KEYS: &[&str] = &["source_client", "client", "agent"];
 
 pub struct SnapshotStats {
     pub items: usize,
@@ -35,18 +38,32 @@ fn meta<'a>(rev: &'a Revision, key: &str) -> &'a str {
     rev.metadata.get(key).map(String::as_str).unwrap_or("")
 }
 
+/// A node's source label: the first non-empty [`SOURCE_KEYS`] metadata value,
+/// else the revision's writer (`rev_username`), else the first non-empty
+/// `fallbacks` entry (item creator, event author). The revision writer comes
+/// before the item creator because a later revision may be written by a
+/// different tenant member than the one who created the item.
+pub(crate) fn pick_source(
+    metadata: &HashMap<String, String>,
+    rev_username: &str,
+    fallbacks: &[&str],
+) -> String {
+    SOURCE_KEYS
+        .iter()
+        .filter_map(|k| metadata.get(*k).map(String::as_str))
+        .chain(std::iter::once(rev_username))
+        .chain(fallbacks.iter().copied())
+        .find(|v| !v.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn source_of(rev: &Revision, item: &Item) -> String {
-    for k in SOURCE_KEYS {
-        let v = meta(rev, k);
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
-    if !item.username.is_empty() {
-        item.username.clone()
-    } else {
-        item.author.clone()
-    }
+    pick_source(
+        &rev.metadata,
+        &rev.username,
+        &[&item.username, &item.author],
+    )
 }
 
 fn space_path_of(item: &Item) -> String {
@@ -393,4 +410,59 @@ pub async fn fetch_revision(
         tags: rev.tags.clone(),
         created_at: rev.created_at.clone().unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn md(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn explicit_client_key_wins_in_order() {
+        let m = md(&[
+            ("agent", "revka"),
+            ("client", "codex"),
+            ("source_client", "claude-code"),
+        ]);
+        assert_eq!(pick_source(&m, "bob", &["alice", "Alice A"]), "claude-code");
+        let m = md(&[("agent", "revka"), ("client", "codex")]);
+        assert_eq!(pick_source(&m, "bob", &["alice", "Alice A"]), "codex");
+        let m = md(&[("source_client", ""), ("agent", "revka")]);
+        assert_eq!(pick_source(&m, "bob", &["alice", "Alice A"]), "revka");
+    }
+
+    #[test]
+    fn revision_writer_beats_item_creator() {
+        // User B's CreateRevision on an item user A created: B wrote it.
+        assert_eq!(pick_source(&md(&[]), "bob", &["alice", "Alice A"]), "bob");
+    }
+
+    #[test]
+    fn created_by_is_not_a_source_key() {
+        // kumiho-server #86 hides it from read metadata; the writer it used to
+        // carry is read from `Revision.username` instead.
+        let m = md(&[("created_by", "mallory")]);
+        assert_eq!(pick_source(&m, "bob", &["alice"]), "bob");
+    }
+
+    #[test]
+    fn falls_back_through_item_creator_to_author() {
+        assert_eq!(pick_source(&md(&[]), "", &["alice", "Alice A"]), "alice");
+        assert_eq!(pick_source(&md(&[]), "", &["", "Alice A"]), "Alice A");
+        assert_eq!(pick_source(&md(&[]), "", &["", ""]), "");
+    }
+
+    #[test]
+    fn live_mapping_without_item_uses_event_author() {
+        // live.rs passes [item.username or "", ev.author]; get_item_by_kref
+        // can fail (SDK kref re-validation), leaving only the event author.
+        assert_eq!(pick_source(&md(&[]), "bob", &["", "Bob B"]), "bob");
+        assert_eq!(pick_source(&md(&[]), "", &["", "Bob B"]), "Bob B");
+    }
 }
