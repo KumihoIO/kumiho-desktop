@@ -18,7 +18,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tauri::{Manager, State};
 
-const CE_PORT: u16 = 9190;
+pub(crate) const CE_PORT: u16 = 9190;
 const BRAIN_PORT: u16 = 8090;
 const CE_CONFIG_FILE: &str = "server.toml";
 const CE_CONFIG_BACKUP_FILE: &str = "server.toml.setup-backup";
@@ -87,7 +87,7 @@ struct CeProcessMarker {
     identity: String,
 }
 
-fn port_open(port: u16) -> bool {
+pub(crate) fn port_open(port: u16) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
 }
@@ -416,7 +416,7 @@ fn remove_ce_process_records(home: &Path) -> Result<(), String> {
     sync_directory(home)
 }
 
-fn any_ce_process_running() -> Result<bool, String> {
+pub(crate) fn any_ce_process_running() -> Result<bool, String> {
     #[cfg(windows)]
     {
         let output = command("tasklist")
@@ -817,7 +817,14 @@ pub fn ce_log_tail() -> String {
 /// for up to ten seconds, which must not park the main thread.
 #[tauri::command]
 pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
+    if crate::transfer::import_in_progress() {
+        return Err("a backup import is running — wait for it to finish before starting Community Edition".into());
+    }
     let start_guard = state.ce_start.lock().map_err(|e| e.to_string())?;
+    // Re-check under the lock: an import may have claimed the slot after the first check.
+    if crate::transfer::import_in_progress() {
+        return Err("a backup import is running — wait for it to finish before starting Community Edition".into());
+    }
     // Mirror brain_start's guard: a second spawn would lose the bind race AND
     // truncate the log the running server is still writing.
     if port_open(CE_PORT) {
