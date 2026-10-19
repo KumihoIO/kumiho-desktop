@@ -821,6 +821,10 @@ pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
         return Err("a backup import is running — wait for it to finish before starting Community Edition".into());
     }
     let start_guard = state.ce_start.lock().map_err(|e| e.to_string())?;
+    // Re-check under the lock: an import may have claimed the slot after the first check.
+    if crate::transfer::import_in_progress() {
+        return Err("a backup import is running — wait for it to finish before starting Community Edition".into());
+    }
     // Mirror brain_start's guard: a second spawn would lose the bind race AND
     // truncate the log the running server is still writing.
     if port_open(CE_PORT) {

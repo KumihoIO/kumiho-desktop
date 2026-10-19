@@ -4,6 +4,8 @@
 //! request, makes sure no writer is running, and relays the server's output.
 
 use crate::util::{ce_binary, command, kumiho_home};
+use crate::AppState;
+use tauri::State;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -97,7 +99,15 @@ fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Result
     let err = drain(Box::new(child.stderr.take().ok_or("no stderr")?));
     let deadline = Instant::now() + timeout;
     let status = loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
+        let polled = match child.try_wait() {
+            Ok(polled) => polled,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
+        };
+        match polled {
             Some(status) => break status,
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
@@ -115,6 +125,12 @@ fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> Result
 fn server_command() -> Result<std::process::Command, String> {
     let bin = ce_binary().ok_or("kumiho_server is not installed yet — install Community Edition first")?;
     let mut cmd = command(&bin.to_string_lossy());
+    // Ambient KUMIHO_* overrides still apply with --config; don't inherit any.
+    for (key, _) in std::env::vars() {
+        if key.starts_with("KUMIHO_") {
+            cmd.env_remove(key);
+        }
+    }
     // Neutral cwd: nothing next to a download can be picked up as settings.
     if let Some(home) = kumiho_home() {
         cmd.current_dir(home);
@@ -126,7 +142,9 @@ fn server_command() -> Result<std::process::Command, String> {
 /// block forever, so require the import usage text before running anything.
 fn ensure_import_supported() -> Result<(), String> {
     let mut cmd = server_command()?;
-    cmd.arg("--help");
+    // A build that predates --help would start the server; park it on an
+    // ephemeral loopback port so the probe can never collide with real CE.
+    cmd.env("KUMIHO_SERVER_ADDR", "127.0.0.1:0").arg("--help");
     let probe = run_with_timeout(cmd, PROBE_TIMEOUT)
         .map_err(|e| format!("could not confirm import support ({e}) — update Community Edition and retry"))?;
     if probe.success && probe.output.contains("import FILE") {
@@ -155,9 +173,30 @@ fn step(label: &str, args: &[&str], file: &Path, config: Option<&Path>, timeout:
     }
     let done = run_with_timeout(cmd, timeout).map_err(|e| format!("{label} failed: {e}"))?;
     if done.success {
-        Ok(done.output)
+        return Ok(done.output);
+    }
+    let reason = failure_reason(&done.output);
+    let hint = failure_hint(&done.output);
+    Err(format!("{label} failed: {reason}{hint}\n({})\n{}", done.status, done.output))
+}
+
+/// Last meaningful line, with the server's Debug wrapper (`Error: Variant("…")`) removed.
+fn failure_reason(output: &str) -> String {
+    let line = output.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no output").trim();
+    let line = line.strip_prefix("Error: ").unwrap_or(line);
+    let unwrapped = line
+        .split_once("(\"")
+        .and_then(|(_, rest)| rest.strip_suffix("\")"))
+        .unwrap_or(line);
+    unwrapped.replace("\\\"", "\"")
+}
+
+fn failure_hint(output: &str) -> &'static str {
+    let lower = output.to_ascii_lowercase();
+    if lower.contains("not empty") || lower.contains("occupied") || lower.contains("receipt") {
+        " — the import needs a dedicated, empty Neo4j database. Community Edition fills its database on first start, so point CE at a new empty database (re-run setup) and try again."
     } else {
-        Err(format!("{label} failed ({}):\n{}", done.status, done.output))
+        ""
     }
 }
 
@@ -178,10 +217,23 @@ fn require_stopped() -> Result<(), String> {
     Ok(())
 }
 
-/// Offline validation: reads only the file, never touches Neo4j or the CE config.
+/// Claim the import slot and prove no CE is running. Holding `ce_start` while the
+/// slot is taken and the check runs closes the window where a start could pass its
+/// own flag check, then spawn after we looked; `ce_start` re-checks the flag under
+/// that lock.
+fn begin_exclusive(state: &State<'_, AppState>) -> Result<ImportGuard, String> {
+    let guard = ImportGuard::acquire()?;
+    let _start = state.ce_start.lock().map_err(|e| e.to_string())?;
+    require_stopped()?;
+    Ok(guard)
+}
+
+/// Offline validation of the archive. It runs the server binary (including a
+/// support probe), so it follows the same "CE stopped" rule as the import.
 #[tauri::command(async)]
-pub fn ce_import_check(path: String) -> Result<String, String> {
+pub fn ce_import_check(state: State<'_, AppState>, path: String) -> Result<String, String> {
     let file = archive_path(&path)?;
+    let _guard = begin_exclusive(&state)?;
     ensure_import_supported()?;
     step("check", &["transfer", "check"], &file, None, CHECK_TIMEOUT)
 }
@@ -189,14 +241,19 @@ pub fn ce_import_check(path: String) -> Result<String, String> {
 /// Check, import, then verify. Refuses while CE is running because the restore
 /// needs exclusive access to a dedicated empty database.
 #[tauri::command(async)]
-pub fn ce_import(path: String) -> Result<String, String> {
+pub fn ce_import(state: State<'_, AppState>, path: String) -> Result<String, String> {
     let file = archive_path(&path)?;
-    let _guard = ImportGuard::acquire()?;
-    require_stopped()?;
+    let _guard = begin_exclusive(&state)?;
     ensure_import_supported()?;
     let config = ce_config()?;
     let checked = step("check", &["transfer", "check"], &file, None, CHECK_TIMEOUT)?;
-    let imported = step("import", &["import"], &file, Some(&config), RESTORE_TIMEOUT)?;
+    let imported = step("import", &["import"], &file, Some(&config), RESTORE_TIMEOUT).map_err(|e| {
+        if e.contains("timed out") {
+            format!("{e}\nThe import was stopped part-way; its transaction does not commit unless it finishes, but check the Neo4j database before retrying.")
+        } else {
+            e
+        }
+    })?;
     // The import is committed at this point; say so if verification fails so
     // nobody retries a full import into the now-occupied database.
     let verified = step("verify", &["transfer", "verify"], &file, Some(&config), RESTORE_TIMEOUT).map_err(|e| {
@@ -211,10 +268,9 @@ pub fn ce_import(path: String) -> Result<String, String> {
 
 /// Re-run verification against an already imported database.
 #[tauri::command(async)]
-pub fn ce_import_verify(path: String) -> Result<String, String> {
+pub fn ce_import_verify(state: State<'_, AppState>, path: String) -> Result<String, String> {
     let file = archive_path(&path)?;
-    let _guard = ImportGuard::acquire()?;
-    require_stopped()?;
+    let _guard = begin_exclusive(&state)?;
     ensure_import_supported()?;
     let config = ce_config()?;
     step("verify", &["transfer", "verify"], &file, Some(&config), RESTORE_TIMEOUT)
@@ -253,6 +309,16 @@ mod tests {
         std::fs::write(&file, b"").unwrap();
         assert!(archive_path(&quoted).unwrap_err().contains("empty"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failure_reason_unwraps_the_servers_debug_error() {
+        let raw = "some log\nError: Invalid(\"target Neo4j database is not empty; refusing\")";
+        assert_eq!(failure_reason(raw), "target Neo4j database is not empty; refusing");
+        assert_eq!(failure_reason("plain failure"), "plain failure");
+        assert_eq!(failure_reason(""), "no output");
+        assert!(failure_hint(raw).contains("empty Neo4j database"));
+        assert_eq!(failure_hint("checksum mismatch"), "");
     }
 
     #[test]
