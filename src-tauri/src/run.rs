@@ -18,7 +18,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tauri::{Manager, State};
 
-const CE_PORT: u16 = 9190;
+pub(crate) const CE_PORT: u16 = 9190;
 const BRAIN_PORT: u16 = 8090;
 const CE_CONFIG_FILE: &str = "server.toml";
 const CE_CONFIG_BACKUP_FILE: &str = "server.toml.setup-backup";
@@ -87,7 +87,7 @@ struct CeProcessMarker {
     identity: String,
 }
 
-fn port_open(port: u16) -> bool {
+pub(crate) fn port_open(port: u16) -> bool {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
 }
@@ -416,7 +416,7 @@ fn remove_ce_process_records(home: &Path) -> Result<(), String> {
     sync_directory(home)
 }
 
-fn any_ce_process_running() -> Result<bool, String> {
+pub(crate) fn any_ce_process_running() -> Result<bool, String> {
     #[cfg(windows)]
     {
         let output = command("tasklist")

@@ -18,6 +18,7 @@ mod pty;
 mod revka;
 mod run;
 mod startup;
+mod transfer;
 mod update;
 mod upgrade;
 mod util;
@@ -124,6 +125,9 @@ fn main() {
             embedding::embedding_status,
             embedding::embedding_backfill,
             embedding::embedding_rebuild_index,
+            // Transfer — import a Cloud .kumiho backup into CE
+            transfer::ce_import_check,
+            transfer::ce_import,
             // Connect — per-host plugin install
             connect::connect_hosts,
             connect::connect_check_updates,

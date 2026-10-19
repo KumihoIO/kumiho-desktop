@@ -300,6 +300,15 @@
               <p class="dim" style="font-size:12px;margin:8px 0 0">API key is stored in your OS keychain. Leave blank to keep the existing key. Changing model or dimensions requires <b>Rebuild vector index</b> + <b>Backfill</b>.</p>
             </div>
           </div>
+          <div class="card" id="ce-import-card">
+            <div class="row"><div class="grow"><span class="b">Import Cloud backup</span> <span class="faint">.kumiho · into this CE</span></div></div>
+            <p class="dim" style="font-size:12px;margin:8px 0">Download a backup from <b>Cloud dashboard → Settings → Workspace backup</b>, then enter its path. Stop CE first; the import needs a dedicated, empty local database and refuses to merge into existing data.</p>
+            <label class="field"><span class="lab">Backup file path</span><input id="import-path" class="mono" placeholder="/path/to/kumiho-workspace.kumiho" spellcheck="false"></label>
+            <div class="row" style="margin-top:10px;flex-wrap:wrap">
+              <button class="sm" id="import-check-btn" onclick="checkImport()">Check file</button>
+              <button class="sm" id="import-run-btn" onclick="runImport()">Import</button>
+            </div>
+          </div>
           <div class="card">
             <div class="row"><div class="grow"><span class="b">Startup</span> <span class="faint">run Kumiho hands-free</span></div></div>
             <label class="row" style="gap:8px;cursor:pointer;margin-top:8px"><input type="checkbox" id="cb-login" onchange="markSettingsDirty()"><span>Launch Kumiho Desktop when I sign in</span></label>
@@ -702,6 +711,20 @@
       setLog('general','✓ Backfill complete: '+r.embedded+' embedded / '+r.total+' total'+(r.errors?' ('+r.errors+' errors)':'')+'. '+(r.message||'')); toast('Backfill: '+r.embedded+'/'+r.total); refreshEmbeddingStatus();
     }catch(e){ setLog('general',String(e),true); toast(String(e),true); }
     finally{ if(btn) btn.disabled=false; refreshEmbeddingStatus(); }
+  }
+  async function checkImport(){
+    const path=$('import-path')?.value||''; setLog('general','Checking backup…');
+    try{ const r=await invoke('ce_import_check',{path}); setLog('general','✓ Backup is valid.\n'+r); toast('Backup is valid'); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+  }
+  async function runImport(){
+    const path=$('import-path')?.value||'';
+    if(!confirm('Import this backup into the local CE database? The database must be empty and CE must be stopped. Keep your Cloud data and the backup file until you have confirmed the result.')) return;
+    const btns=['import-check-btn','import-run-btn'].map($); btns.forEach(b=>{ if(b) b.disabled=true; });
+    setLog('general','Importing… this can take a few minutes.');
+    try{ const r=await invoke('ce_import',{path}); setLog('general','✓ Import complete: restored and verified.\n'+r); toast('Import complete'); }
+    catch(e){ setLog('general',String(e),true); toast(String(e),true); }
+    finally{ btns.forEach(b=>{ if(b) b.disabled=false; }); }
   }
   async function rebuildVectorIndex(){
     if(!confirm('Rebuild the vector index? This is required when you change the embedding model or dimensions. Existing embeddings will be kept but may be re-indexed; run Backfill afterwards to re-embed.')) return;
