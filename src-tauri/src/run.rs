@@ -817,6 +817,9 @@ pub fn ce_log_tail() -> String {
 /// for up to ten seconds, which must not park the main thread.
 #[tauri::command]
 pub async fn ce_start(state: State<'_, AppState>) -> Result<String, String> {
+    if crate::transfer::import_in_progress() {
+        return Err("a backup import is running — wait for it to finish before starting Community Edition".into());
+    }
     let start_guard = state.ce_start.lock().map_err(|e| e.to_string())?;
     // Mirror brain_start's guard: a second spawn would lose the bind race AND
     // truncate the log the running server is still writing.

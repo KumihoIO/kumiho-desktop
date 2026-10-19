@@ -128,6 +128,7 @@ fn main() {
             // Transfer — import a Cloud .kumiho backup into CE
             transfer::ce_import_check,
             transfer::ce_import,
+            transfer::ce_import_verify,
             // Connect — per-host plugin install
             connect::connect_hosts,
             connect::connect_check_updates,
