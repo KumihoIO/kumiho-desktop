@@ -997,6 +997,23 @@ pub fn ce_stop(state: State<'_, AppState>, force: Option<bool>) -> Result<String
     }
 }
 
+/// Caller holds ce_start for the entire import, excluding Desktop starts.
+pub(crate) fn ensure_ce_stopped_for_import(state: &AppState) -> Result<(), String> {
+    let home = kumiho_home().ok_or("no home directory")?;
+    let mut tracked = state.ce.lock().map_err(|e| e.to_string())?;
+    let running = match tracked.as_mut() {
+        Some(child) => child.try_wait().map_err(|e| e.to_string())?.is_none(),
+        None => false,
+    };
+    if running || port_open(CE_PORT) || recorded_ce_running(&home)? || uncertain_ce_launch(&home)? || any_ce_process_running()? {
+        return Err("Stop the Community Edition server before importing. Keep Neo4j running and stop other database writers.".into());
+    }
+    if setup_config_pending_at(&home) {
+        return Err("Finish or recover the pending CE setup before importing a backup.".into());
+    }
+    Ok(())
+}
+
 /// Avoid leaving an unbound startup child behind when Desktop exits normally.
 /// A healthy committed CE server is intentionally allowed to keep serving.
 pub fn kill_pending_ce(app: &tauri::AppHandle) {

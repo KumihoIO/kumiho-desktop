@@ -30,6 +30,7 @@ jobs:
         run: |
           node scripts/test-active-server-health.cjs
           node scripts/test-ce-setup.cjs
+          node scripts/test-ce-backup.cjs
           node scripts/test-desktop-release-gate.cjs
           node scripts/test-html5-file-drop.cjs
           node scripts/test-9miho-update.cjs
